@@ -7,6 +7,10 @@ on:
   pull_request_review_comment:
     types: [ created ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   review:
     name: Claude Code Review
