@@ -28,5 +28,8 @@ jobs:
       with:
         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
         ## Comma-separated list of GitHub usernames allowed to trigger @claude.
+        ## 'assisted-by-ai' is the org bot account that opens internal
+        ## refactor PRs; without it on the list every bot-opened PR
+        ## fails the actor check.
         ## Remove or leave empty to allow everyone.
-        allowed_users: "adrelanos,ArrayBolt3"
+        allowed_users: "adrelanos,ArrayBolt3,assisted-by-ai"

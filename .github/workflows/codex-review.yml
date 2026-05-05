@@ -11,6 +11,12 @@ jobs:
       contents: read
       pull-requests: write
 
+    ## Skip on PRs from forks: the action consumes secrets.OPENAI_API_KEY
+    ## and would otherwise burn paid OpenAI calls on attacker-controlled
+    ## prompts/code. Maintainer can re-trigger via workflow_dispatch if a
+    ## fork PR genuinely needs review.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
@@ -22,4 +28,18 @@ jobs:
       uses: openai/codex-action@main
       with:
         openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+        ## The action gates on the actor having write access to the
+        ## repo (defense-in-depth so a fork PR cannot get arbitrary
+        ## prompts executed under our paid OPENAI_API_KEY). The
+        ## 'assisted-by-ai' bot member of org-ai-assisted only has
+        ## read on Whonix/kloak (the upstream this fork tracks), so
+        ## without an explicit bypass the action errors out at start.
+        ## allow-bot-users skips the actor-write check for the named
+        ## bot only - strictly narrower than granting write on the
+        ## upstream.
+        allow-bot-users: assisted-by-ai
+        ## Sandbox the Codex run: review only, no workspace mutation.
+        ## We invoke this purely for review comments; nothing else
+        ## should change on disk.
+        sandbox: read-only
         prompt: Review the code changes in this PR for security, correctness, and best practices.
