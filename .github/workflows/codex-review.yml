@@ -2,6 +2,15 @@ name: OpenAI Codex Review
 
 on:
   pull_request:
+  ## Manual override for the fork-PR skip path. The job-level
+  ## `if:` below permanently skips Codex on PRs whose head is from
+  ## a fork (so untrusted code can't burn our paid OPENAI_API_KEY);
+  ## that's the right default but means well-vetted external
+  ## contributions never get a Codex review either. workflow_dispatch
+  ## lets a maintainer who has already reviewed the fork PR by hand
+  ## kick off a Codex pass on it from the Actions tab.
+  ## Caught by Codex P2 on kloak#1 codex-review.yml:22.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,9 +26,12 @@ jobs:
 
     ## Skip on PRs from forks: the action consumes secrets.OPENAI_API_KEY
     ## and would otherwise burn paid OpenAI calls on attacker-controlled
-    ## prompts/code. Maintainer can re-trigger via workflow_dispatch if a
-    ## fork PR genuinely needs review.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    ## prompts/code. Maintainer can re-trigger via workflow_dispatch (see
+    ## the `on:` block above) if a fork PR genuinely needs review.
+    ## github.event.pull_request is null for workflow_dispatch events,
+    ## so the comparison short-circuits to running the job in that case
+    ## (workflow_dispatch is implicitly a maintainer-authorized trigger).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
     - name: Checkout repository
