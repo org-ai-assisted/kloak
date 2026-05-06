@@ -27,8 +27,14 @@ on:
         required: true
         type: string
 
+## Concurrency key explicitly includes inputs.pr_ref so manual
+## reviews of different fork PRs (workflow_dispatch with different
+## pr_ref values) get distinct groups and don't cancel each other.
+## On pull_request the input is empty and we fall through to
+## github.ref (the PR's head ref) which already differs per PR.
+## Caught by Codex P2 on kloak#1 codex-review.yml:31.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.pr_ref || github.ref }}
   cancel-in-progress: true
 
 ## Allow-list for actors that bypass the openai/codex-action
