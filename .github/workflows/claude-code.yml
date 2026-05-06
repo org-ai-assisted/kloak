@@ -7,8 +7,18 @@ on:
   pull_request_review_comment:
     types: [ created ]
 
+## Concurrency key explicitly includes the PR/issue number for
+## comment-triggered runs because GitHub documents 'issue_comment'
+## and 'pull_request_review_comment' as running on the default-branch
+## ref. Without the PR number in the key, every comment-triggered
+## run on every PR would share one group, and 'cancel-in-progress:
+## true' would silently cancel an in-flight Claude review on PR #A
+## the moment a comment lands on PR #B. The fall-through to
+## 'github.ref' covers the 'pull_request' trigger, where the ref
+## already differs per PR.
+## Caught by Codex: kloak#1 review thread on this file.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
