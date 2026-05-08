@@ -889,54 +889,100 @@ static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
   }
 }
 
-static int32_t parse_uint31_arg(const char *arg_name, const char *val,
-  int base) {
+/*
+ * Pure value parser for INT31 args (max INT32_MAX, non-negative).
+ *
+ * Splits the strtoul + bounds check from the FATAL-ERROR + exit
+ * path so that future fuzz harnesses can drive the parser
+ * directly. libFuzzer must keep its process alive across millions
+ * of invocations; a target that calls exit() on every parse
+ * failure stops fuzzing after one rejected input. The existing
+ * exit-on-error wrapper below preserves the runtime behavior for
+ * normal CLI argument parsing - the fatal-error path remains
+ * unchanged for production callers.
+ *
+ * Returns 0 on success (with the parsed value written through
+ * 'out'), or -1 on parse / range error. Does not write to 'out'
+ * on error.
+ */
+static int parse_uint31_arg_value(const char *val, int base, int32_t *out) {
   char *val_endchar = NULL;
   uint64_t val_int = 0;
 
+  if (val == NULL || out == NULL) {
+    return -1;
+  }
   errno = 0;
   val_int = strtoul(val, &val_endchar, base);
   if (errno == ERANGE) {
-    goto parse_uint31_arg_error;
+    return -1;
   }
-  if (*val_endchar != '\0') {
-    goto parse_uint31_arg_error;
+  if (val_endchar == val || *val_endchar != '\0') {
+    /*
+     * val_endchar == val means strtoul consumed nothing (empty
+     * string or no leading digits in the requested base). Both
+     * 'no progress' and 'trailing garbage' are rejected.
+     */
+    return -1;
   }
   if (val_int > INT32_MAX) {
-    goto parse_uint31_arg_error;
+    return -1;
   }
-  return (int32_t)(val_int);
+  *out = (int32_t)(val_int);
+  return 0;
+}
 
-parse_uint31_arg_error:
-  fprintf(stderr,
-    "FATAL ERROR: Invalid value '%s' passed to parameter '%s'!\n", val, arg_name);
-  exit(1);
-  return -1;
+static int32_t parse_uint31_arg(const char *arg_name, const char *val,
+  int base) {
+  int32_t parsed = 0;
+
+  if (parse_uint31_arg_value(val, base, &parsed) != 0) {
+    fprintf(stderr,
+      "FATAL ERROR: Invalid value '%s' passed to parameter '%s'!\n", val, arg_name);
+    exit(1);
+  }
+  return parsed;
+}
+
+/*
+ * Pure value parser for UINT32 args. Same rationale as
+ * parse_uint31_arg_value above - extracted for fuzz-harness use.
+ *
+ * Returns 0 on success (with the parsed value written through
+ * 'out'), or -1 on parse / range error.
+ */
+static int parse_uint32_arg_value(const char *val, int base, uint32_t *out) {
+  char *val_endchar = NULL;
+  uint64_t val_int = 0;
+
+  if (val == NULL || out == NULL) {
+    return -1;
+  }
+  errno = 0;
+  val_int = strtoul(val, &val_endchar, base);
+  if (errno == ERANGE) {
+    return -1;
+  }
+  if (val_endchar == val || *val_endchar != '\0') {
+    return -1;
+  }
+  if (val_int > UINT32_MAX) {
+    return -1;
+  }
+  *out = (uint32_t)(val_int);
+  return 0;
 }
 
 static uint32_t parse_uint32_arg(const char *arg_name, const char *val,
   int base) {
-  char *val_endchar = NULL;
-  uint64_t val_int = 0;
+  uint32_t parsed = 0;
 
-  errno = 0;
-  val_int = strtoul(val, &val_endchar, base);
-  if (errno == ERANGE) {
-    goto parse_uint32_arg_error;
+  if (parse_uint32_arg_value(val, base, &parsed) != 0) {
+    fprintf(stderr,
+      "FATAL ERROR: Invalid value '%s' passed to parameter '%s'!\n", val, arg_name);
+    exit(1);
   }
-  if (*val_endchar != '\0') {
-    goto parse_uint32_arg_error;
-  }
-  if (val_int > UINT32_MAX) {
-    goto parse_uint32_arg_error;
-  }
-  return (uint32_t)(val_int);
-
-parse_uint32_arg_error:
-  fprintf(stderr,
-    "FATAL ERROR: Invalid value '%s' passed to parameter '%s'!\n", val, arg_name);
-  exit(1);
-  return 0;
+  return parsed;
 }
 
 static int32_t sleep_ms(int64_t ms) {
