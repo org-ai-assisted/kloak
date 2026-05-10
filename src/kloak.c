@@ -1846,7 +1846,7 @@ static struct input_packet * update_virtual_cursor(void) {
         if (trav_scr_coord.valid) {
           start.y = trav_coord.y - 1;
           start.x = trav_coord.x;
-          end.y = trav_coord.y -1;
+          end.y = trav_coord.y - 1;
           i = -1;
           continue;
         }
