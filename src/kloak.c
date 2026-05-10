@@ -2326,7 +2326,7 @@ static void release_scheduled_input_events(void) {
       assert(packet->sched_time >= 0);
       if (packet->sched_time > UINT32_MAX) {
         fprintf(stderr,
-          "packet->sched_time overflowed maximum value. This is not an error, but kloak must be restarted. Exiting.");
+          "packet->sched_time overflowed maximum value. This is not an error, but kloak must be restarted. Exiting.\n");
         exit(0);
       }
       assert(state.pointer_space_x >= 0);
