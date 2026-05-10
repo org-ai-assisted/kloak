@@ -57,7 +57,7 @@
 #include "wlr-virtual-pointer.h"
 #include "virtual-keyboard.h"
 /*
- * wayland-scanner generates code that is generates warnings with -Wcast-qual
+ * wayland-scanner generates code that generates warnings with -Wcast-qual
  * for xdg-output-protocol.h and wlr-layer-shell.h.
  */
 #pragma GCC diagnostic push
