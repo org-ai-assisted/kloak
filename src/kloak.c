@@ -738,7 +738,7 @@ static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
     cur_geom_width = state.output_geometries[i]->width;
     cur_geom_height = state.output_geometries[i]->height;
     if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
-      || cur_geom_height < 0 ) {
+      || cur_geom_height < 0) {
       continue;
     }
 
