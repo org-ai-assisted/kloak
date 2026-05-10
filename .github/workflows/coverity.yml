@@ -26,8 +26,8 @@ jobs:
       apt-packages: "libevdev-dev libinput-dev libwayland-dev libxkbcommon-dev pkg-config"
       build-command: ./cov-analysis/bin/cov-build --dir cov-int make
       ## scan.coverity.com project name. Verified at
-      ## https://scan.coverity.com/projects/Whonix-kloak
-      project-name: Whonix-kloak
+      ## https://scan.coverity.com/projects/Whonix-kloak (URL renders / as -; API still wants the slash)
+      project-name: Whonix/kloak
       canonical-repos: "Whonix/kloak,org-ai-assisted/kloak"
     secrets:
       COVERITY_SCAN_TOKEN: ${{ secrets.COVERITY_SCAN_TOKEN }}
