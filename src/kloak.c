@@ -77,6 +77,7 @@
 #include "kloak_inotify.inc.h"
 #include "kloak_pixbuf.inc.h"
 #include "kloak_traverse.inc.h"
+#include "kloak_layer_dims.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 
@@ -394,6 +395,11 @@ static void recalc_global_space(struct disp_state *param_state) {
       param_state->global_space_height = r.global_space_height;
       param_state->pointer_space_x = r.pointer_space_x;
       param_state->pointer_space_y = r.pointer_space_y;
+      return;
+    default:
+      /* Unreachable; the pure helper only returns the three
+       * statuses above. The default case exists to satisfy
+       * -Wswitch-default. */
       return;
   }
 }
@@ -987,6 +993,7 @@ static void layer_surface_configure(void *data,
   ssize_t i = 0;
   int shm_fd = 0;
   struct wl_region *zeroed_region = NULL;
+  struct kloak_layer_dims dims = { 0 };
 
   assert(should_draw_cursor);
 
@@ -999,14 +1006,25 @@ static void layer_surface_configure(void *data,
     }
   }
   assert(layer != NULL);
-  assert(width <= INT32_MAX / 4);
-  assert(height <= INT32_MAX);
-  layer->width = (int32_t)(width);
-  layer->height = (int32_t)(height);
-  layer->stride = (int32_t)(width * 4);
-  layer->size = layer->stride * layer->height;
-  assert(layer->size >= 0);
-  assert(layer->size <= INT32_MAX / MAX_UNRELEASED_FRAMES);
+  /* Validate width/height + derive stride / size in int64_t.
+   * The previous inline arithmetic computed 'stride * height' in
+   * int32_t and only then asserted the bounds; under -ftrapv
+   * the multiplication would trap before the assertion could
+   * fire. compute_layer_dims_pure() does every step in int64_t
+   * and rejects on overflow. Production callers see real
+   * compositor dimensions and never hit the rejection path; a
+   * hostile compositor would. */
+  dims = compute_layer_dims_pure(width, height);
+  if (!dims.valid) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor reported layer dimensions kloak cannot represent (%ux%u).\n",
+      width, height);
+    exit(1);
+  }
+  layer->width  = dims.width;
+  layer->height = dims.height;
+  layer->stride = dims.stride;
+  layer->size   = dims.size;
   shm_fd = create_shm_file(layer->size * MAX_UNRELEASED_FRAMES);
   if (shm_fd == -1) {
     fprintf(stderr,
