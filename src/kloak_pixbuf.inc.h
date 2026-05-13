@@ -52,15 +52,43 @@ static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
   int32_t end_y = 0;
   int32_t work_x = 0;
   int32_t work_y = 0;
+  int64_t step_sx = 0;
+  int64_t step_sy = 0;
+  int64_t step_ex = 0;
+  int64_t step_ey = 0;
 
-  start_x = x - rad;
-  if (start_x < 0) start_x = 0;
-  start_y = y - rad;
-  if (start_y < 0) start_y = 0;
-  end_x = x + rad;
-  if (end_x >= layer_width) end_x = layer_width - 1;
-  end_y = y + rad;
-  if (end_y >= layer_height) end_y = layer_height - 1;
+  /*
+   * Promote the four x/y +/- rad arithmetic sites to int64_t and
+   * clamp every result to the layer's [0, dim-1] range. The
+   * fuzz_draw_block harness in CFLite caught two issues here:
+   * (a) 'x - rad' with x near INT32_MIN and rad large overflows
+   *     int32_t and traps under -ftrapv, and
+   * (b) a negative rad makes 'x - rad' larger than INT32_MAX, so
+   *     even after the int64_t promotion the bare (int32_t) cast
+   *     wraps to a negative value -- which the loop then uses as
+   *     an array index and reads outside the pixbuf.
+   * Clamping every step to [0, dim-1] makes the loop a no-op
+   * when start > end after clamping (correct production
+   * behaviour: nothing to paint). Production callers pass small
+   * cursor coordinates and a tiny non-negative rad, so the
+   * additional clamps never fire for real screens.
+   */
+  step_sx = (int64_t)x - (int64_t)rad;
+  step_sy = (int64_t)y - (int64_t)rad;
+  step_ex = (int64_t)x + (int64_t)rad;
+  step_ey = (int64_t)y + (int64_t)rad;
+  if (step_sx < 0) step_sx = 0;
+  if (step_sy < 0) step_sy = 0;
+  if (step_ex < 0) step_ex = 0;
+  if (step_ey < 0) step_ey = 0;
+  if (step_sx >= (int64_t)layer_width)  step_sx = (int64_t)layer_width  - 1;
+  if (step_sy >= (int64_t)layer_height) step_sy = (int64_t)layer_height - 1;
+  if (step_ex >= (int64_t)layer_width)  step_ex = (int64_t)layer_width  - 1;
+  if (step_ey >= (int64_t)layer_height) step_ey = (int64_t)layer_height - 1;
+  start_x = (int32_t)step_sx;
+  start_y = (int32_t)step_sy;
+  end_x   = (int32_t)step_ex;
+  end_y   = (int32_t)step_ey;
 
   for (work_y = start_y; work_y <= end_y; work_y++) {
     for (work_x = start_x; work_x <= end_x; work_x++) {
