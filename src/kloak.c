@@ -81,6 +81,7 @@
 #include "kloak_layer_dims.inc.h"
 #include "kloak_poll_timeout.inc.h"
 #include "kloak_scroll_ticks.inc.h"
+#include "kloak_keymap_check.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 #include "kloak_cli_args.inc.h"
@@ -750,11 +751,19 @@ static void kb_handle_keymap(void *data,
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
 
-  if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
-    fprintf(stderr,
-      "WARNING: Unsupported raw keymap was provided by server, ignoring.\n");
-    safe_close(fd);
-    return;
+  /* Format check moved to check_keymap_buf_pure() in
+   * kloak_keymap_check.inc.h alongside the NUL-terminator
+   * check below; this branch handles the no-mmap-yet case
+   * where the buffer pointer is not available. */
+  {
+    struct kloak_keymap_check_result pre_check =
+      check_keymap_buf_pure(format, NULL, 0);
+    if (!pre_check.format_supported) {
+      fprintf(stderr,
+        "WARNING: Unsupported raw keymap was provided by server, ignoring.\n");
+      safe_close(fd);
+      return;
+    }
   }
 
   assert(size <= INT32_MAX);
@@ -765,11 +774,16 @@ static void kb_handle_keymap(void *data,
     exit(1);
   }
 
-  /* XKB v1 keymaps are NULL-terminated strings. */
-  if (memchr(kb_map_shm, '\0', size) == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator!\n");
-    exit(1);
+  /* XKB v1 keymaps are NUL-terminated strings; the pure
+   * validator runs memchr over the mapped region to confirm. */
+  {
+    struct kloak_keymap_check_result buf_check =
+      check_keymap_buf_pure(format, kb_map_shm, size);
+    if (!buf_check.null_terminated) {
+      fprintf(stderr,
+        "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator!\n");
+      exit(1);
+    }
   }
 
   if (param_state->old_kb_map_shm) {
