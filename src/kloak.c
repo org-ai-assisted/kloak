@@ -83,6 +83,7 @@
 #include "kloak_scroll_ticks.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
+#include "kloak_cli_args.inc.h"
 
 /********************/
 /* global variables */
@@ -2063,73 +2064,35 @@ static void applayer_poll_init(void) {
   }
 }
 
+/* The getopt dispatch + per-option validation moved to
+ * src/kloak_cli_args.inc.h as parse_cli_args_pure(); this
+ * wrapper applies the parsed values to module-scope globals,
+ * print_usage()/exit()s on help-or-error, and dispatches
+ * parse_esc_key_str() for the -k optarg (which the pure helper
+ * intentionally does not invoke - kept out so the fuzz harness
+ * does not have to manage esc_key state between iterations). */
 static void parse_cli_args(int argc, char **argv) {
-  const char *optstring = "d:s:hc:k:n:";
-  static struct option optarr[] = {
-    {"delay", required_argument, NULL, 'd'},
-    {"start-delay", required_argument, NULL, 's'},
-    {"help", no_argument, NULL, 'h'},
-    {"color", required_argument, NULL, 'c'},
-    {"esc-key-combo", required_argument, NULL, 'k'},
-    {"natural-scrolling", required_argument, NULL, 'n'},
-    {0, 0, 0, 0}
-  };
-  int getopt_rslt = 0;
+  bool esc_key_str_set = false;
+  const char *esc_key_str = NULL;
+  enum kloak_cli_args_status rc = KLOAK_CLI_ARGS_OK;
 
-  while(true) {
-    getopt_rslt = getopt_long(argc, argv, optstring, optarr, NULL);
-    if (getopt_rslt == -1) {
-      break;
-    } else if (getopt_rslt == '?') {
-      print_usage();
-      exit(1);
-    } else if (getopt_rslt == 'd') {
-      if (!parse_uint31_arg(optarg, 10, &max_delay)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'delay'!",
-          optarg);
-        exit(1);
-      }
-    } else if (getopt_rslt == 's') {
-      if (!parse_uint31_arg(optarg, 10, &startup_delay)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'start-delay'!",
-          optarg);
-        exit(1);
-      }
-    } else if (getopt_rslt == 'c') {
-      if (!parse_uint32_arg(optarg, 16, &cursor_color)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'color'!",
-          optarg);
-        exit(1);
-      }
-      if ((cursor_color >> 24) == 0) {
-        /*
-         * Cursor is entirely transparent, disable drawing it to save
-         * resources
-         */
-        should_draw_cursor = false;
-      }
-    } else if (getopt_rslt == 'n') {
-      if (strcmp(optarg, "true") == 0) {
-        enable_natural_scrolling = true;
-      } else {
-        enable_natural_scrolling = false;
-      }
-    } else if (getopt_rslt == 'k') {
-      if (!parse_esc_key_str(optarg)) {
-        exit(1);
-      }
-    } else if (getopt_rslt == 'h') {
-      print_usage();
-      exit(0);
-    } else {
-      print_usage();
+  rc = parse_cli_args_pure(argc, argv,
+    &max_delay, &startup_delay, &cursor_color,
+    &should_draw_cursor, &enable_natural_scrolling,
+    &esc_key_str_set, &esc_key_str);
+  if (rc == KLOAK_CLI_ARGS_HELP) {
+    print_usage();
+    exit(0);
+  }
+  if (rc == KLOAK_CLI_ARGS_ERROR) {
+    print_usage();
+    exit(1);
+  }
+  if (esc_key_str_set) {
+    if (!parse_esc_key_str(esc_key_str)) {
       exit(1);
     }
   }
-
   if (esc_key_list == NULL) {
     if (!parse_esc_key_str(default_esc_key_str)) {
       exit(1);
