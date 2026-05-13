@@ -1,1 +1,0 @@
-xkb_keymap { xkb_keycodes "x" { minimum = -1; maximum = -1; }; }
