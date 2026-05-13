@@ -6,30 +6,27 @@
 ## ClusterFuzzLite C/C++ Dockerfile.
 ## https://google.github.io/clusterfuzzlite/build-integration/c-cpp-lang/
 ##
-## Image: gcr.io/oss-fuzz-base/base-builder, ubuntu-24-04 tag.
+## Image: gcr.io/oss-fuzz-base/base-builder, :latest tag.
 ##
 ## Trust root - this image path is the canonical C/C++ base for
 ## OSS-Fuzz / ClusterFuzzLite, published by Google's OSS-Fuzz
 ## project:
 ##   https://github.com/google/oss-fuzz/tree/master/infra/base-images/base-builder
 ##
-## We pin the ubuntu-24-04 tag rather than 'latest' (still Ubuntu
-## 20.04) so the build environment matches the modern wayland +
-## libinput versions kloak.c is written against. Without this,
-## kloak's references to wl_output v4 events (wayland 1.20+) and
-## the libinput 1.19+ high-resolution scroll API would force
-## per-symbol #ifdef guards across kloak.c just to build the fuzz
-## image - dead complexity in production code. The harnesses
-## themselves do not link libinput / wayland (parsers-only
-## refactor; see fuzz/fuzz_*.c), but a modern build base keeps
-## the door open for future harnesses that DO want to compile
-## kloak.c against the real APIs without conditional gates.
+## We pin :latest (currently sha256:5ca8fa8b...) rather than the
+## ubuntu-24-04 tag. CFLite's run-fuzzers container is hardcoded
+## to clusterfuzzlite-run-fuzzers:v1 (the run_fuzzers GitHub
+## Action exposes no input to override the image), and that v1 tag
+## ships Ubuntu 20.04 / glibc 2.31. A binary built against the
+## ubuntu-24-04 base-builder (glibc 2.39) cannot load there - the
+## loader rejects it with "GLIBC_2.38 not found". OSS-Fuzz keeps
+## :latest matched to the run-fuzzers :v1 ABI for this reason.
 ##
-## Digest sha256:375d1e42... resolved from the 'ubuntu-24-04' tag
-## via the registry manifest API docker-content-digest header
-## (verification step, not trust source):
-##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/ubuntu-24-04
-FROM gcr.io/oss-fuzz-base/base-builder@sha256:375d1e426c0bbbcc7fb347fa175cab40c5646216c5fd522f9f2b6d5c8cb70629
+## Digest sha256:5ca8fa8b... resolved from the :latest tag via the
+## registry manifest API docker-content-digest header (verification
+## step, not trust source):
+##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/latest
+FROM gcr.io/oss-fuzz-base/base-builder@sha256:5ca8fa8bd9f933429af8f4df2d2e268e0d1e2a4fc6fd6e0aa5c6b3f53dfc99c5
 
 COPY . $SRC/kloak
 COPY .clusterfuzzlite/build.sh $SRC/build.sh
