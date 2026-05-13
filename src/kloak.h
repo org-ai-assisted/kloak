@@ -356,8 +356,10 @@ static struct coord traverse_line(struct coord start, struct coord end,
  * set to true, crosshairs representing the cursor will be drawn in the block,
  * otherwise the block will simply blank out anything that it is drawing over.
  */
-static void draw_block(uint32_t * pixbuf, int32_t offset, int32_t x, int32_t y,
-  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair);
+/* draw_block moved to src/kloak_pixbuf.inc.h alongside the
+ * other extracted helpers. The signature gained an explicit
+ * 'cursor_color' parameter so callers wire that global through;
+ * the fuzz harness passes a fuzz-controlled value. */
 
 /*
  * Parse an option parameter as an integer between 0 and INT32_MAX, and save
