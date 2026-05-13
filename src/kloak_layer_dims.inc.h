@@ -79,12 +79,19 @@ struct kloak_layer_dims compute_layer_dims_pure(uint32_t width,
    * is checked would let total64 = size64 * 3 overflow int64
    * itself (size64 max = INT32_MAX * INT32_MAX = 4.6e18, * 3
    * = 1.4e19 > INT64_MAX) - which fuzz_layer_dims caught on
-   * the first CFLite run. */
-  if (size64 < 0 || size64 > INT32_MAX) {
+   * the first CFLite run.
+   *
+   * No '< 0' branch on either: after the width/height upper
+   * bounds at the top of the function, stride64 = width * 4
+   * is in [0, INT32_MAX], size64 = stride64 * height is in
+   * [0, INT32_MAX * INT32_MAX], and total64 = size64 * 3 is
+   * provably non-negative. CodeQL flagged the original 'total64
+   * < 0' as unreachable. */
+  if (size64 > INT32_MAX) {
     return out;
   }
   total64 = size64 * KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES;
-  if (total64 < 0 || total64 > INT32_MAX) {
+  if (total64 > INT32_MAX) {
     return out;
   }
 
