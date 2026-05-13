@@ -79,6 +79,8 @@
 #include "kloak_traverse.inc.h"
 #include "kloak_walk_cursor.inc.h"
 #include "kloak_layer_dims.inc.h"
+#include "kloak_poll_timeout.inc.h"
+#include "kloak_scroll_ticks.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 
@@ -543,29 +545,21 @@ static void detach_input_device(const char *dev_name) {
   libinput_path_remove_device(dev);
 }
 
+/* get_ticks_from_scroll_accum()'s math moved to src/kloak_scroll_
+ * ticks.inc.h as get_ticks_from_scroll_accum_pure(); this wrapper
+ * keeps the assert() preconditions in place (production wants to
+ * abort on impossible-in-prod inputs; the pure helper returns
+ * valid=false instead so the fuzz harness can drive adversarial
+ * doubles). */
 static int32_t get_ticks_from_scroll_accum(double *accum_ptr) {
-  double scroll_accum = *accum_ptr;
-  double scroll_ticks_d = 0.0;
-  int32_t scroll_ticks = 0;
-
-  if (fpclassify(scroll_accum) != FP_ZERO) {
-    assert(isfinite(scroll_accum));
-    scroll_ticks_d = scroll_accum / SCROLL_UNITS_PER_TICK_D;
-    /* We intentionally use SCROLL_UNITS_PER_TICK here, not
-     * SCROLL_UNITS_PER_TICK_D. The extra fraction of a scroll tick we would
-     * gain from using SCROLL_UNITS_PER_TICK_D is not worthwhile, and having
-     * the enforced threshold slightly lower than the real threshold is
-     * arguably safer. */
-    assert(scroll_ticks_d <= (INT32_MAX / SCROLL_UNITS_PER_TICK));
-    assert(scroll_ticks_d >= (INT32_MIN / SCROLL_UNITS_PER_TICK));
-    scroll_ticks = (int32_t)(scroll_ticks_d);
-    if (scroll_ticks != 0) {
-      scroll_accum += -(scroll_ticks * SCROLL_UNITS_PER_TICK);
-      *accum_ptr = scroll_accum;
-    }
+  struct kloak_scroll_ticks_result r;
+  assert(isfinite(*accum_ptr));
+  r = get_ticks_from_scroll_accum_pure(*accum_ptr);
+  assert(r.valid);
+  if (r.ticks != 0) {
+    *accum_ptr = r.new_accum;
   }
-
-  return scroll_ticks;
+  return r.ticks;
 }
 
 static void wl_display_flush_safe(struct wl_display *display) {
@@ -1835,23 +1829,17 @@ static void handle_inotify_events(void) {
 }
 
 
+/* calc_poll_timeout()'s saturating int64 subtraction moved to
+ * src/kloak_poll_timeout.inc.h as kloak_poll_timeout_pure();
+ * this wrapper pulls the queue head and current time. */
 static int calc_poll_timeout(void) {
   const struct input_packet *packet = NULL;
-  int64_t timeout_duration = 0;
 
   packet = TAILQ_FIRST(&evq_head);
   if (packet == NULL) {
     return -1;
   }
-
-  timeout_duration = packet->sched_time - current_time_ms();
-  if (timeout_duration < 0) {
-    return 0;
-  }
-  if (timeout_duration > INT_MAX) {
-    return INT_MAX;
-  }
-  return (int)(timeout_duration);
+  return kloak_poll_timeout_pure(packet->sched_time, current_time_ms());
 }
 
 static void print_usage(void) {
