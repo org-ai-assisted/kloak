@@ -73,6 +73,7 @@
 #include "kloak.h"
 #include "kloak_geometry.inc.h"
 #include "kloak_inotify.inc.h"
+#include "kloak_pixbuf.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 
@@ -628,38 +629,6 @@ struct coord traverse_line(struct coord start, struct coord end,
   return out_val;
 }
 
-static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
-  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair) {
-  int32_t start_x = 0;
-  int32_t start_y = 0;
-  int32_t end_x = 0;
-  int32_t end_y = 0;
-  int32_t work_x = 0;
-  int32_t work_y = 0;
-
-  assert(should_draw_cursor);
-
-  start_x = x - rad;
-  if (start_x < 0) start_x = 0;
-  start_y = y - rad;
-  if (start_y < 0) start_y = 0;
-  end_x = x + rad;
-  if (end_x >= layer_width) end_x = layer_width - 1;
-  end_y = y + rad;
-  if (end_y >= layer_height) end_y = layer_height - 1;
-
-  for (work_y = start_y; work_y <= end_y; work_y++) {
-    for (work_x = start_x; work_x <= end_x; work_x++) {
-      if (crosshair && work_x == x) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
-      } else if (crosshair && work_y == y) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
-      } else {
-        pixbuf[offset + (work_y * layer_width + work_x)] = 0x00000000;
-      }
-    }
-  }
-}
 
 static int32_t sleep_ms(int64_t ms) {
   struct timespec ts = { 0 };
@@ -1114,7 +1083,8 @@ static void wl_buffer_release(__attribute__((unused)) void *data,
           state.layers[i]->width,
           state.layers[i]->height,
           CURSOR_RADIUS,
-          false
+          false,
+          cursor_color
         );
         break;
       }
@@ -1369,7 +1339,7 @@ static void draw_frame(struct drawable_layer *layer) {
     /* Draw crosshairs at the pointer location */
     draw_block(layer->pixbuf, (layer->size * chosen_frame_idx) / 4,
       scr_coord.x, scr_coord.y, layer->width, layer->height, CURSOR_RADIUS,
-      true);
+      true, cursor_color);
     damage_surface_enh(layer->surface, scr_coord.x - CURSOR_RADIUS,
       scr_coord.y - CURSOR_RADIUS, scr_coord.x + CURSOR_RADIUS + 1,
       scr_coord.y + CURSOR_RADIUS + 1);
