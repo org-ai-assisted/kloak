@@ -102,17 +102,29 @@ for harness in fuzz/fuzz_*.c; do
   ## OSS-Fuzz / ClusterFuzzLite convention: a seed corpus for
   ## fuzzer 'X' is packaged as $OUT/X_seed_corpus.zip. CFLite
   ## auto-extracts it before the run and uses it to bootstrap
-  ## libFuzzer's coverage exploration. Files we check into
-  ## fuzz/corpus/<name>/ are pre-built inputs that exercise
-  ## specific branches the random byte stream would take a long
-  ## time to discover on its own (e.g. valid KEY_* names, a
-  ## minimal-but-parseable xkb keymap, geometry-edge cases).
-  if [ -d "fuzz/corpus/${name}" ] \
-    && [ -n "$(ls -A "fuzz/corpus/${name}" 2>/dev/null)" ]; then
-    # shellcheck disable=SC2164
-    (cd "fuzz/corpus/${name}" && zip -q -r "${OUT}/${name}_seed_corpus.zip" .)
-    printf 'packaged seed corpus -> %s_seed_corpus.zip (%d files)\n' \
-      "${name}" "$(ls -1 "fuzz/corpus/${name}" | wc -l)"
+  ## libFuzzer's coverage exploration.
+  ##
+  ## Seed bytes are GENERATED at build time from per-harness
+  ## Python scripts at fuzz/<name>_seeds.py. The script receives
+  ## one argument - the output directory - and is responsible
+  ## for writing each seed as a separate file there. Keeping the
+  ## generator source-controlled (instead of the binary blobs)
+  ## means the wire-format intent is reviewable as code, the
+  ## tree stays free of binary noise, and a contributor can
+  ## tweak a seed by editing a few lines of Python rather than
+  ## crafting bytes by hand. The generator is optional - a
+  ## harness without one ships an empty corpus and libFuzzer
+  ## starts from random bytes.
+  if [ -f "fuzz/${name}_seeds.py" ]; then
+    seed_tmpdir="$(mktemp -d)"
+    if python3 "fuzz/${name}_seeds.py" "${seed_tmpdir}" \
+      && [ -n "$(ls -A "${seed_tmpdir}" 2>/dev/null)" ]; then
+      # shellcheck disable=SC2164
+      (cd "${seed_tmpdir}" && zip -q -r "${OUT}/${name}_seed_corpus.zip" .)
+      printf 'packaged seed corpus -> %s_seed_corpus.zip (%d files)\n' \
+        "${name}" "$(ls -1 "${seed_tmpdir}" | wc -l)"
+    fi
+    rm -rf -- "${seed_tmpdir}"
   fi
 done
 
