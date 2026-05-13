@@ -195,7 +195,8 @@ static struct key_name_value key_table[] = {
  * terminate the application if the parse fails. This it to make it easier to
  * fuzz kloak.
  */
-static bool parse_uint31_arg(const char *val, int base, int32_t *out) {
+static __attribute__((unused))
+bool parse_uint31_arg(const char *val, int base, int32_t *out) {
   char *val_endchar = NULL;
   uint64_t val_int = 0;
 
@@ -220,7 +221,8 @@ static bool parse_uint31_arg(const char *val, int base, int32_t *out) {
   return true;
 }
 
-static bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
+static __attribute__((unused))
+bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
   char *val_endchar = NULL;
   uint64_t val_int = 0;
 
@@ -245,7 +247,8 @@ static bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
   return true;
 }
 
-static uint32_t lookup_keycode(const char *name) {
+static __attribute__((unused))
+uint32_t lookup_keycode(const char *name) {
   struct key_name_value *p = NULL;
 
   for (p = key_table; p->name != NULL; p++) {
@@ -288,7 +291,8 @@ static size_t *esc_key_sublist_len = NULL;
 static bool *active_esc_key_list = NULL;
 static size_t esc_key_list_len = 0;
 
-static bool parse_esc_key_str(const char *esc_key_str) {
+static __attribute__((unused))
+bool parse_esc_key_str(const char *esc_key_str) {
   char *esc_key_str_copy = safe_strdup(esc_key_str);
   char *orig_key_str_copy = esc_key_str_copy;
   char *root_token = NULL;

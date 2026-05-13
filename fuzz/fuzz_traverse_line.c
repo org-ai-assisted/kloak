@@ -45,20 +45,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
    *   4 bytes   end.y   (int32, LE)
    *   4 bytes   pos     (int32, LE)
    */
+  struct coord start = { 0 };
+  struct coord end = { 0 };
+  struct coord out = { 0 };
+  int32_t pos = 0;
+
   if (size < 20U) {
     return 0;
   }
 
-  struct coord start = { 0 };
-  struct coord end = { 0 };
-  int32_t pos = 0;
   memcpy(&start.x, data + 0,  sizeof(int32_t));
   memcpy(&start.y, data + 4,  sizeof(int32_t));
   memcpy(&end.x,   data + 8,  sizeof(int32_t));
   memcpy(&end.y,   data + 12, sizeof(int32_t));
   memcpy(&pos,     data + 16, sizeof(int32_t));
 
-  struct coord out = traverse_line(start, end, pos);
+  out = traverse_line(start, end, pos);
   /* Force the compiler not to elide the call. */
   asm volatile("" : : "r"(out.x), "r"(out.y) : "memory");
   return 0;

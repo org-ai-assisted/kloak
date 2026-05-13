@@ -11,19 +11,28 @@
 ##
 ## 1. Invoked by .clusterfuzzlite/build.sh inside the OSS-Fuzz
 ##    base-builder container. $SRC / $OUT / $CC / $CFLAGS /
-##    $LIB_FUZZING_ENGINE are pre-set by the container.
+##    $LIB_FUZZING_ENGINE are pre-set by the container (clang +
+##    sanitizer wiring + -O1 / -fno-omit-frame-pointer).
 ##
 ## 2. Invoked by ci/cfuzz-run.sh on the host (no Docker, no
 ##    sanitizer-aware $CC). Picks sensible defaults: clang +
 ##    -fsanitize=fuzzer,address,undefined. Useful for local
 ##    developer iteration without spinning up Docker.
 ##
-## The harnesses include only src/kloak_parsers.inc.h - the
-## pure-parser surface factored out of kloak.c. No libinput /
-## wayland / libevdev / xkbcommon linkage, no wayland-scanner
-## codegen, no rpath / library bundling - the resulting binaries
-## launch in any libc-class environment, including OSS-Fuzz's
-## minimal run-fuzzers container.
+## In both modes the kloak upstream hardening flags from the
+## Makefile (WARN_CFLAGS + FORTIFY_CFLAGS + BIN_CFLAGS, and the
+## LDFLAGS too) are APPENDED to whatever $CFLAGS / $LDFLAGS the
+## caller supplied. Keep this list in sync with the Makefile if
+## upstream tightens hardening further. We append rather than
+## replace so libFuzzer's sanitizer wiring (-fsanitize=fuzzer-no-
+## link,address,undefined and -fno-omit-frame-pointer) survives.
+##
+## The harnesses include only kloak's pure parser / geometry /
+## coord / inotify / pixbuf / traverse / esc_combo surfaces. No
+## libinput / wayland / libevdev / xkbcommon linkage, no wayland-
+## scanner codegen, no rpath / library bundling - the resulting
+## binaries launch in any libc-class environment, including OSS-
+## Fuzz's minimal run-fuzzers container.
 
 set -o errexit
 set -o nounset
@@ -46,9 +55,77 @@ fi
 if [ -z "${CFLAGS:-}" ]; then
   CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined"
 fi
+if [ -z "${LDFLAGS:-}" ]; then
+  LDFLAGS=""
+fi
 if [ -z "${LIB_FUZZING_ENGINE:-}" ]; then
   LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
 fi
+
+## --- kloak upstream hardening flags (mirrors Makefile) --------------
+##
+## Source of truth: ../Makefile WARN_CFLAGS / FORTIFY_CFLAGS /
+## BIN_CFLAGS / LDFLAGS. Re-checked against Makefile at the time
+## these comments were written; if you edit one place, edit the
+## other.
+##
+## Reference: https://www.kicksecure.com/wiki/Dev/compiler_hardening
+
+KLOAK_WARN_CFLAGS="-Wall -Wextra -Wformat -Wformat=2 -Wconversion \
+-Wimplicit-fallthrough -Werror=format-security -Werror=implicit \
+-Werror=int-conversion -Werror=incompatible-pointer-types \
+-Wformat-overflow -Wformat-signedness -Wformat-truncation \
+-Wnull-dereference -Winit-self -Wmissing-include-dirs \
+-Wshift-negative-value -Wshift-overflow -Wswitch-default \
+-Wuninitialized -Walloca -Warray-bounds -Wfloat-equal -Wshadow \
+-Wpointer-arith -Wundef -Wunused-macros -Wbad-function-cast -Wcast-qual \
+-Wcast-align -Wwrite-strings -Wdate-time -Wstrict-prototypes \
+-Wold-style-definition -Wredundant-decls -Winvalid-utf8 -Wvla \
+-Wdisabled-optimization -Wstack-protector -Wdeclaration-after-statement"
+
+## Non-clang-only warnings - clang as of 19.1 does not recognise
+## several of the GCC-specific -W flags. Matches the Makefile
+## guard.
+case "$(${CC} --version 2>/dev/null || true)" in
+  *clang*) ;;
+  *)
+    KLOAK_WARN_CFLAGS="${KLOAK_WARN_CFLAGS} \
+-Wtrampolines -Wbidi-chars=any,ucn -Wformat-overflow=2 \
+-Wformat-truncation=2 -Wshift-overflow=2 -Wtrivial-auto-var-init \
+-Wstringop-overflow=3 -Wstrict-flex-arrays -Walloc-zero \
+-Warray-bounds=2 -Wattribute-alias=2 \
+-Wduplicated-branches -Wduplicated-cond -Wcast-align=strict \
+-Wjump-misses-init -Wlogical-op"
+  ;;
+esac
+
+## CRITICAL: -ftrapv must come AFTER -fno-strict-overflow because
+## -fno-strict-overflow implies -fwrapv and -ftrapv must override
+## -fwrapv. See Makefile comment of the same shape.
+KLOAK_FORTIFY_CFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+-fstack-clash-protection -fstack-protector-all \
+-fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing \
+-fstrict-flex-arrays=3 -ftrapv -ftrivial-auto-var-init=pattern"
+
+## Architecture-specific hardening. CFLite runs on x86_64; gating
+## here keeps the local build portable.
+TARGETARCH="$(${CC} -dumpmachine 2>/dev/null || true)"
+case "${TARGETARCH}" in
+  x86_64*-linux-gnu*)
+    KLOAK_FORTIFY_CFLAGS="${KLOAK_FORTIFY_CFLAGS} -fcf-protection=full -fzero-call-used-regs=all"
+  ;;
+  aarch64*-linux-gnu*)
+    KLOAK_FORTIFY_CFLAGS="${KLOAK_FORTIFY_CFLAGS} -mbranch-protection=standard -fzero-call-used-regs=all"
+  ;;
+esac
+
+KLOAK_BIN_CFLAGS="-fPIE"
+
+KLOAK_LDFLAGS="-Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
+-Wl,-z,separate-code -Wl,--as-needed -Wl,--no-copy-dt-needed-entries -pie"
+
+CFLAGS="${CFLAGS} ${KLOAK_WARN_CFLAGS} ${KLOAK_FORTIFY_CFLAGS} ${KLOAK_BIN_CFLAGS}"
+LDFLAGS="${LDFLAGS} ${KLOAK_LDFLAGS}"
 
 ## --- Harness compile loop -------------------------------------------
 ##
@@ -69,7 +146,8 @@ for harness in fuzz/fuzz_*.c; do
   ${CC} ${CFLAGS} \
     "${harness}" \
     -o "${OUT}/${name}" \
-    ${LIB_FUZZING_ENGINE}
+    ${LIB_FUZZING_ENGINE} \
+    ${LDFLAGS}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
 

@@ -52,22 +52,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
    *   4 bytes   rad (int32, LE)
    *   4 bytes   cursor_color (uint32, LE)
    */
+  uint8_t flags = 0;
+  bool crosshair = false;
+  uint32_t frame_slot = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t rad = 0;
+  uint32_t cursor_color = 0;
+  int32_t offset = 0;
+
   if (size < 17U) {
     return 0;
   }
 
-  uint8_t flags = data[0];
-  bool crosshair = (flags & 0x1) != 0;
-  uint32_t frame_slot = (flags >> 1) & 0x3;
-
-  int32_t x = 0, y = 0, rad = 0;
-  uint32_t cursor_color = 0;
+  flags = data[0];
+  crosshair = (flags & 0x1) != 0;
+  frame_slot = (flags >> 1) & 0x3;
   memcpy(&x, data + 1, sizeof(int32_t));
   memcpy(&y, data + 5, sizeof(int32_t));
   memcpy(&rad, data + 9, sizeof(int32_t));
   memcpy(&cursor_color, data + 13, sizeof(uint32_t));
 
-  int32_t offset = (int32_t)(frame_slot * KLOAK_FUZZ_FRAME_PIXELS);
+  offset = (int32_t)(frame_slot * KLOAK_FUZZ_FRAME_PIXELS);
   draw_block(g_pixbuf, offset, x, y,
     KLOAK_FUZZ_LAYER_W, KLOAK_FUZZ_LAYER_H, rad, crosshair, cursor_color);
   return 0;

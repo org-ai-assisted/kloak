@@ -47,28 +47,36 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
    *   1 byte    output_idx_byte (low 3 bits used by coord_local_to_abs)
    *   geom_count * 16 bytes (x, y, w, h - 4 x int32 LE per geom)
    */
+  uint8_t hdr = 0;
+  size_t geom_count = 0;
+  bool also_call_local_to_abs = false;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint8_t output_idx_byte = 0;
+  size_t cursor = 10;
+  size_t i = 0;
+  size_t idx = 0;
+  struct output_geometry geoms_storage[KLOAK_FUZZ_MAX_GEOMS] = { 0 };
+  struct output_geometry *geoms_ptrs[KLOAK_FUZZ_MAX_GEOMS] = { 0 };
+  struct screen_local_coord local = { 0 };
+  struct coord abs_c = { 0 };
+
   if (size < 10U) {
     return 0;
   }
 
-  uint8_t hdr = data[0];
-  size_t geom_count = (size_t)(hdr & 0x7);  /* 0..7 */
-  bool also_call_local_to_abs = (hdr & 0x8) != 0;
-
-  int32_t x = 0;
-  int32_t y = 0;
+  hdr = data[0];
+  geom_count = (size_t)(hdr & 0x7);  /* 0..7 */
+  also_call_local_to_abs = (hdr & 0x8) != 0;
   memcpy(&x, data + 1, sizeof(int32_t));
   memcpy(&y, data + 5, sizeof(int32_t));
-  uint8_t output_idx_byte = data[9];
-  size_t cursor = 10;
+  output_idx_byte = data[9];
 
   if (size < cursor + geom_count * 16U) {
     return 0;
   }
 
-  struct output_geometry geoms_storage[KLOAK_FUZZ_MAX_GEOMS] = { 0 };
-  struct output_geometry *geoms_ptrs[KLOAK_FUZZ_MAX_GEOMS] = { 0 };
-  for (size_t i = 0; i < geom_count; i++) {
+  for (i = 0; i < geom_count; i++) {
     memcpy(&geoms_storage[i].x,      data + cursor +  0, sizeof(int32_t));
     memcpy(&geoms_storage[i].y,      data + cursor +  4, sizeof(int32_t));
     memcpy(&geoms_storage[i].width,  data + cursor +  8, sizeof(int32_t));
@@ -83,16 +91,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     cursor += 16;
   }
 
-  struct screen_local_coord local = coord_abs_to_local_pure(x, y,
-    geoms_ptrs, geom_count);
+  local = coord_abs_to_local_pure(x, y, geoms_ptrs, geom_count);
   asm volatile("" : :
     "r"(local.x), "r"(local.y), "r"(local.output_idx), "r"(local.valid)
     : "memory");
 
   if (also_call_local_to_abs && geom_count > 0) {
-    size_t idx = (size_t)(output_idx_byte & 0x7);
+    idx = (size_t)(output_idx_byte & 0x7);
     if (idx >= geom_count) idx = geom_count - 1;
-    struct coord abs_c = coord_local_to_abs_pure(x, y, geoms_ptrs[idx]);
+    abs_c = coord_local_to_abs_pure(x, y, geoms_ptrs[idx]);
     asm volatile("" : : "r"(abs_c.x), "r"(abs_c.y) : "memory");
   }
 

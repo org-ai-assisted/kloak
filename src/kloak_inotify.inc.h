@@ -51,11 +51,7 @@ static void parse_inotify_buffer(const char *buf, ssize_t len,
   inotify_dispatch_fn dispatch) __attribute__((unused));
 static void parse_inotify_buffer(const char *buf, ssize_t len,
   inotify_dispatch_fn dispatch) {
-  if (buf == NULL || len <= 0) {
-    return;
-  }
-
-  ssize_t rem_len = len;
+  ssize_t rem_len = 0;
   /* The kernel-supplied buffer is guaranteed sufficiently
    * aligned per inotify(7); the cast cannot be UB at runtime for
    * the production caller. Adversarial fuzz inputs may not be
@@ -66,6 +62,12 @@ static void parse_inotify_buffer(const char *buf, ssize_t len,
 #pragma GCC diagnostic ignored "-Wcast-align"
   const struct inotify_event *ie = (const struct inotify_event *)buf;
 #pragma GCC diagnostic pop
+  ssize_t struct_len = 0;
+
+  if (buf == NULL || len <= 0) {
+    return;
+  }
+  rem_len = len;
 
   while (true) {
     if (rem_len < (ssize_t)sizeof(struct inotify_event)) {
@@ -76,7 +78,7 @@ static void parse_inotify_buffer(const char *buf, ssize_t len,
     if ((uint32_t)ie->len > (uint32_t)(SSIZE_MAX - sizeof(struct inotify_event))) {
       return;
     }
-    ssize_t struct_len =
+    struct_len =
       (ssize_t)sizeof(struct inotify_event) + (ssize_t)ie->len;
     if (struct_len > rem_len) {
       return;

@@ -88,25 +88,29 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  struct combo_setup *c = NULL;
+  size_t i = 0;
+  size_t pos = 1;
+  uint32_t key = 0;
+  bool pressed = false;
+
   if (size < 1U) {
     return 0;
   }
-  struct combo_setup *c = &g_combos[data[0] & 0x3];
+  c = &g_combos[data[0] & 0x3];
   if (c->list == NULL) {
     return 0;
   }
   /* Reset the active mask for this combo before replaying the
    * event stream so iterations do not bleed state. */
-  for (size_t i = 0; i < c->list_len; i++) {
+  for (i = 0; i < c->list_len; i++) {
     c->active[i] = false;
   }
 
-  size_t pos = 1;
   while (pos + sizeof(uint32_t) + 1U <= size) {
-    uint32_t key = 0;
     memcpy(&key, data + pos, sizeof(uint32_t));
     pos += sizeof(uint32_t);
-    bool pressed = (data[pos] & 0x1) != 0;
+    pressed = (data[pos] & 0x1) != 0;
     pos += 1;
     (void)esc_combo_update(key, pressed,
       c->list, c->sublist_lens, c->list_len, c->active);
