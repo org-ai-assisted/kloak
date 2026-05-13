@@ -81,8 +81,17 @@ KLOAK_LDFLAGS := -Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
 CFLAGS := $(WARN_CFLAGS) $(FORTIFY_CFLAGS) $(BIN_CFLAGS) $(CFLAGS)
 LDFLAGS := $(KLOAK_LDFLAGS) $(LDFLAGS)
 
+# Gate the pkg-config presence check so it does not fire when
+# ci/cfuzz-build.sh invokes 'make print-kloak-cflags' /
+# 'make print-kloak-ldflags' from inside the OSS-Fuzz base-
+# builder container (which has clang but not pkg-config). The
+# print-* targets emit static flag strings and never touch
+# pkg-config; the check is only required when actually building
+# kloak / man pages / the install tree.
+ifeq (,$(filter print-kloak-cflags print-kloak-ldflags,$(MAKECMDGOALS)))
 ifeq (, $(shell which $(PKG_CONFIG)))
 $(error pkg-config not installed!)
+endif
 endif
 
 # Default goal pinned explicitly so adding helper targets like
