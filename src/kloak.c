@@ -2254,7 +2254,7 @@ static void handle_inotify_events(void) {
   }
 }
 
-static void parse_esc_key_str(const char *esc_key_str) {
+static bool parse_esc_key_str(const char *esc_key_str) {
   char *esc_key_str_copy = safe_strdup(esc_key_str);
   char *orig_key_str_copy = esc_key_str_copy;
   char *root_token = NULL;
@@ -2266,7 +2266,8 @@ static void parse_esc_key_str(const char *esc_key_str) {
     if (root_token[0] == '\0' ) {
       fprintf(stderr,
         "FATAL ERROR: Empty key name specified in escape key list!\n");
-      exit(1);
+      free(orig_key_str_copy);
+      return false;
     }
 
     esc_key_list_len++;
@@ -2284,7 +2285,8 @@ static void parse_esc_key_str(const char *esc_key_str) {
       if (sub_token[0] == '\0') {
         fprintf(stderr,
           "FATAL ERROR: Empty key name specified in escape key list!\n");
-        exit(1);
+        free(orig_key_str_copy);
+        return false;
       }
 
       esc_key_sublist_len[i]++;
@@ -2294,12 +2296,14 @@ static void parse_esc_key_str(const char *esc_key_str) {
       if (esc_key_list[i][j] == 0) {
         fprintf(stderr, "FATAL ERROR: Unrecognized Key name '%s'!\n",
           sub_token);
-        exit(1);
+        free(orig_key_str_copy);
+        return false;
       }
     }
   }
 
   free(orig_key_str_copy);
+  return true;
 }
 
 static int calc_poll_timeout(void) {
@@ -2597,7 +2601,9 @@ static void parse_cli_args(int argc, char **argv) {
         enable_natural_scrolling = false;
       }
     } else if (getopt_rslt == 'k') {
-      parse_esc_key_str(optarg);
+      if (!parse_esc_key_str(optarg)) {
+        exit(1);
+      }
     } else if (getopt_rslt == 'h') {
       print_usage();
       exit(0);
@@ -2608,7 +2614,9 @@ static void parse_cli_args(int argc, char **argv) {
   }
 
   if (esc_key_list == NULL) {
-    parse_esc_key_str(default_esc_key_str);
+    if (!parse_esc_key_str(default_esc_key_str)) {
+      exit(1);
+    }
   }
 }
 

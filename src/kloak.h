@@ -564,7 +564,7 @@ static void handle_inotify_events(void);
 /*
  * Parses an escape key specification into the escape key globals.
  */
-static void parse_esc_key_str(const char *esc_key_str);
+static bool parse_esc_key_str(const char *esc_key_str);
 
 /*
  * Determines how long the core event loop's `poll` should sleep for.
