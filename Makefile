@@ -81,20 +81,15 @@ KLOAK_LDFLAGS := -Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
 CFLAGS := $(WARN_CFLAGS) $(FORTIFY_CFLAGS) $(BIN_CFLAGS) $(CFLAGS)
 LDFLAGS := $(KLOAK_LDFLAGS) $(LDFLAGS)
 
-# Targets that emit the kloak-specific CFLAGS / LDFLAGS so other
-# build scripts (currently ci/cfuzz-build.sh) can append the same
-# hardening flags to their own build commands without duplicating
-# the list. Use 'make -s CC=$(CC) print-kloak-cflags' to invoke;
-# -s silences the recipe echo.
-.PHONY: print-kloak-cflags print-kloak-ldflags
-print-kloak-cflags:
-	@printf '%s' "$(WARN_CFLAGS) $(FORTIFY_CFLAGS) $(BIN_CFLAGS)"
-print-kloak-ldflags:
-	@printf '%s' "$(KLOAK_LDFLAGS)"
-
 ifeq (, $(shell which $(PKG_CONFIG)))
 $(error pkg-config not installed!)
 endif
+
+# Default goal pinned explicitly so adding helper targets like
+# the print-kloak-* phonies below cannot accidentally hijack
+# 'make' with no arguments (which CodeQL's build.sh, debian/
+# rules and `make install` all rely on).
+.DEFAULT_GOAL := all
 
 all : kloak
 
@@ -149,3 +144,16 @@ install : all etc/apparmor.d/usr.bin.kloak $(MANPAGES)
 	$(INSTALL) -m 755 kloak $(DESTDIR)$(bindir)
 	$(INSTALL) -m 644 $(MANPAGES) $(DESTDIR)$(mandir)/man8
 	$(INSTALL) -m 644 etc/apparmor.d/usr.bin.kloak $(DESTDIR)$(apparmor_dir)
+
+# Targets that emit the kloak-specific CFLAGS / LDFLAGS so other
+# build scripts (currently ci/cfuzz-build.sh) can append the same
+# hardening flags to their own build commands without duplicating
+# the list. Use 'make -s CC=$(CC) print-kloak-cflags' to invoke;
+# -s silences the recipe echo. Placed at the bottom of the file
+# so they can never become the default goal (which CodeQL's
+# build.sh and debian/rules both rely on being 'all').
+.PHONY: print-kloak-cflags print-kloak-ldflags
+print-kloak-cflags:
+	@printf '%s' "$(WARN_CFLAGS) $(FORTIFY_CFLAGS) $(BIN_CFLAGS)"
+print-kloak-ldflags:
+	@printf '%s' "$(KLOAK_LDFLAGS)"
