@@ -244,15 +244,13 @@ union rand_int64 {
 static void *safe_calloc(size_t nmemb, size_t size);
 
 /*
- * Reallocates the requested amount of memory and returns a pointer to it.
- * Kills the process if the allocation fails.
+ * safe_reallocarray() and safe_strdup() are forward-declared in
+ * src/kloak_parsers.inc.h instead of here. The .inc.h is also
+ * included by the libFuzzer harnesses, which need the forward
+ * declarations so that parse_esc_key_str (which uses both) can
+ * be compiled in their TUs. Declaring them only once - in the
+ * .inc.h - avoids a -Wredundant-decls warning in kloak.c's TU.
  */
-static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size);
-
-/*
- * Duplicates a string. Kills the process if allocation fails.
- */
-static char *safe_strdup(const char *s);
 
 /*
  * Opens a file. Kills the process if the open fails.
@@ -564,7 +562,8 @@ static void handle_inotify_events(void);
 /*
  * Parses an escape key specification into the escape key globals.
  */
-static bool parse_esc_key_str(const char *esc_key_str);
+/* parse_esc_key_str moved to kloak_parsers.inc.h alongside the
+ * other CLI parser surface. */
 
 /*
  * Determines how long the core event loop's `poll` should sleep for.

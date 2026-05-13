@@ -32,6 +32,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <linux/input-event-codes.h>
@@ -254,5 +255,113 @@ static uint32_t lookup_keycode(const char *name) {
   }
   return 0;
 }
+
+/*
+ * parse_esc_key_str() parses the --esc-keys CLI argument's value
+ * (a comma-separated list of pipe-separated key-name groups, e.g.
+ * "KEY_LEFTSHIFT|KEY_RIGHTSHIFT,KEY_ESC") into the four module-
+ * scope globals below. Returns false on the first malformed token
+ * (empty entry, unknown key name); the caller is responsible for
+ * terminating the process. Designed exit()-free so it can be a
+ * libFuzzer target; see fuzz/fuzz_parse_esc_key_str.c.
+ *
+ * The block is gated by KLOAK_INCLUDE_ESC_KEY_PARSER so the three
+ * simple-parser harnesses (fuzz_parse_uint31 / fuzz_parse_uint32
+ * / fuzz_lookup_keycode) - which do not call parse_esc_key_str -
+ * skip the safe_strdup / safe_reallocarray forward decls and
+ * avoid -Wundefined-internal warnings for those symbols.
+ */
+#ifdef KLOAK_INCLUDE_ESC_KEY_PARSER
+
+/*
+ * Forward-declare safe_strdup / safe_reallocarray so the parser
+ * body below compiles in any consuming TU. Each consuming TU
+ * supplies its own definitions: kloak.c has the production
+ * versions (abort on OOM with a FATAL ERROR message), the fuzz
+ * harness supplies minimal abort()-on-OOM stubs.
+ */
+static char *safe_strdup(const char *s);
+static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size);
+
+static uint32_t **esc_key_list = NULL;
+static size_t *esc_key_sublist_len = NULL;
+static bool *active_esc_key_list = NULL;
+static size_t esc_key_list_len = 0;
+
+static bool parse_esc_key_str(const char *esc_key_str) {
+  char *esc_key_str_copy = safe_strdup(esc_key_str);
+  char *orig_key_str_copy = esc_key_str_copy;
+  char *root_token = NULL;
+  const char *sub_token = NULL;
+  size_t i = 0;
+  size_t j = 0;
+
+  for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
+    if (root_token[0] == '\0' ) {
+      fprintf(stderr,
+        "FATAL ERROR: Empty key name specified in escape key list!\n");
+      free(orig_key_str_copy);
+      return false;
+    }
+
+    esc_key_list_len++;
+    esc_key_list = safe_reallocarray(esc_key_list, esc_key_list_len,
+      sizeof(uint32_t *));
+    esc_key_sublist_len = safe_reallocarray(esc_key_sublist_len,
+      esc_key_list_len, sizeof(size_t));
+    active_esc_key_list = safe_reallocarray(active_esc_key_list,
+      esc_key_list_len, sizeof(bool));
+    esc_key_list[i] = NULL;
+    esc_key_sublist_len[i] = 0;
+    active_esc_key_list[i] = false;
+
+    for (j = 0; ((sub_token = strsep(&root_token, "|")) != NULL); j++)  {
+      if (sub_token[0] == '\0') {
+        fprintf(stderr,
+          "FATAL ERROR: Empty key name specified in escape key list!\n");
+        free(orig_key_str_copy);
+        return false;
+      }
+
+      esc_key_sublist_len[i]++;
+      esc_key_list[i] = safe_reallocarray(esc_key_list[i],
+        esc_key_sublist_len[i], sizeof(uint32_t));
+      esc_key_list[i][j] = lookup_keycode(sub_token);
+      if (esc_key_list[i][j] == 0) {
+        fprintf(stderr, "FATAL ERROR: Unrecognized Key name '%s'!\n",
+          sub_token);
+        free(orig_key_str_copy);
+        return false;
+      }
+    }
+  }
+
+  free(orig_key_str_copy);
+  return true;
+}
+
+/*
+ * reset_esc_key_state() releases everything parse_esc_key_str()
+ * allocated into the four globals above and zeroes them, so a
+ * subsequent parse starts from a clean slate. The production
+ * binary parses --esc-keys exactly once and never calls this;
+ * libFuzzer harnesses call it between iterations to avoid
+ * unbounded memory growth.
+ */
+static void reset_esc_key_state(void) __attribute__((unused));
+static void reset_esc_key_state(void) {
+  for (size_t k = 0; k < esc_key_list_len; k++) {
+    free(esc_key_list[k]);
+  }
+  free(esc_key_list);
+  esc_key_list = NULL;
+  free(esc_key_sublist_len);
+  esc_key_sublist_len = NULL;
+  free(active_esc_key_list);
+  active_esc_key_list = NULL;
+  esc_key_list_len = 0;
+}
+
+#endif /* KLOAK_INCLUDE_ESC_KEY_PARSER */
 
 #endif /* KLOAK_PARSERS_INC_H */
