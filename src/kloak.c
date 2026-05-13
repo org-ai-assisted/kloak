@@ -2085,14 +2085,14 @@ static void release_scheduled_input_events(void) {
 }
 
 static void dispatch_inotify_event(const struct inotify_event *ie) {
-  /* parse_inotify_buffer in kloak_inotify.inc.h has already
-   * validated that ie + sizeof(struct inotify_event) + ie->len
-   * is within bounds, but it does NOT bound how long the name
-   * field is. The strncmp below reads strlen("event") + 1 = 6
-   * bytes; without the explicit length guard, a kernel- or
-   * fuzz-supplied event with ie->len < 6 would race the
-   * strncmp into the next event's header. */
-  if (ie->len < strlen("event") + 1) {
+  /* Per inotify(7) the 'name' field is optional: when present it
+   * is always NUL-terminated (and NUL-padded out to 'len'), so
+   * strncmp would honour the terminator. When ie->len == 0 the
+   * name is absent entirely and ie->name aliases whatever bytes
+   * follow this record - that is the actual out-of-bounds read
+   * to guard against. (Corrected after review feedback that the
+   * original 'ie->len < 6' guard overshot the real bug class.) */
+  if (ie->len == 0) {
     return;
   }
   if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
