@@ -22,6 +22,18 @@
 ## loader rejects it with "GLIBC_2.38 not found". OSS-Fuzz keeps
 ## :latest matched to the run-fuzzers :v1 ABI for this reason.
 ##
+## Upstream tracking:
+##   https://github.com/google/clusterfuzzlite/issues/145 - asks
+##     for Ubuntu 20.04 -> 24.04 migration (open, June 2025).
+##   https://github.com/google/clusterfuzzlite/pull/146 - proposes
+##     flipping the build + run actions to :ubuntu-24-04-v1 tags
+##     (not merged; reviewer blocked on missing opt-in / backward-
+##     compat path for existing users).
+##
+## When that work lands and OSS-Fuzz republishes :latest pointing
+## at the new ABI, this pin can be refreshed in a single digest
+## swap - no source-level changes expected.
+##
 ## Digest sha256:5ca8fa8b... resolved from the :latest tag via the
 ## registry manifest API docker-content-digest header (verification
 ## step, not trust source):
