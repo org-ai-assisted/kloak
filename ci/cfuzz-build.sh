@@ -52,43 +52,24 @@ fi
 
 ## --- Harness compile loop -------------------------------------------
 ##
-## Per-harness extra flags / libs. fuzz_xkb_keymap links against
-## libxkbcommon (the parser surface kloak feeds with compositor-
-## supplied keymap strings); the other harnesses are libc-only.
-##
-## We do not use a global '-lxkbcommon -Wl,--as-needed' because
-## CFLite's run-fuzzers:v1 container is not guaranteed to ship
-## libxkbcommon.so; keeping the dep local to the one harness that
-## needs it makes it obvious where to focus if a future bump of
-## the runtime container breaks library resolution.
+## All current harnesses are libc-only (no pkg-config libs, no
+## rpath). A previous iteration linked fuzz_xkb_keymap against
+## libxkbcommon and used the per-harness extra-flags pattern; the
+## harness was dropped because xkbcommon 0.10 (Ubuntu 20.04) had
+## parser bugs that fuzzing discovered immediately. The per-
+## harness extra-flags machinery is gone with it; restore it the
+## same shape if a future harness needs a non-libc dep.
 
 for harness in fuzz/fuzz_*.c; do
   name="$(basename -- "${harness}" .c)"
-
-  extra_cflags=""
-  extra_libs=""
-  extra_ldflags=""
-  case "${name}" in
-    fuzz_xkb_keymap)
-      extra_cflags="$(pkg-config --cflags xkbcommon)"
-      extra_libs="$(pkg-config --libs xkbcommon)"
-      ## rpath $ORIGIN so the binary finds libxkbcommon.so.0
-      ## bundled next to it in $OUT/ at runtime. $ORIGIN survives
-      ## bash single-quoting and reaches the linker literally.
-      extra_ldflags='-Wl,-rpath,$ORIGIN'
-      ;;
-  esac
 
   printf 'building %s\n' "${name}"
 
   # shellcheck disable=SC2086
   ${CC} ${CFLAGS} \
-    ${extra_cflags} \
     "${harness}" \
     -o "${OUT}/${name}" \
-    ${LIB_FUZZING_ENGINE} \
-    ${extra_ldflags} \
-    ${extra_libs}
+    ${LIB_FUZZING_ENGINE}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
 
