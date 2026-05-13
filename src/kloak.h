@@ -639,8 +639,14 @@ static const struct wl_output_listener output_listener = {
   .mode = wl_output_handle_mode,
   .done = wl_output_info_done,
   .scale = wl_output_handle_scale,
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+  /* wl_output v4 (wayland 1.20+) added name / description events.
+   * Older wayland-client headers lack these fields in
+   * wl_output_listener; skip them so kloak builds against the
+   * OSS-Fuzz base-builder's Ubuntu 20.04 wayland (1.18). */
   .name = wl_output_handle_name,
   .description = wl_output_handle_description,
+#endif
 };
 static const struct zxdg_output_v1_listener xdg_output_listener = {
   .logical_position = xdg_output_handle_logical_position,
