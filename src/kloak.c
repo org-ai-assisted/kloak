@@ -72,6 +72,7 @@
 
 #include "kloak.h"
 #include "kloak_geometry.inc.h"
+#include "kloak_coord.inc.h"
 #include "kloak_inotify.inc.h"
 #include "kloak_pixbuf.inc.h"
 #include "kloak_traverse.inc.h"
@@ -491,89 +492,15 @@ static void recalc_global_space(struct disp_state *param_state) {
 
 static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
   int32_t y) {
-  struct screen_local_coord out_data = { 0 };
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  int32_t i = 0;
-
-  if (x < 0 || y < 0) {
-    return out_data;
-  }
-
-  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (!state.output_geometries[i]) {
-      continue;
-    }
-
-    cur_geom_x = state.output_geometries[i]->x;
-    cur_geom_y = state.output_geometries[i]->y;
-    cur_geom_width = state.output_geometries[i]->width;
-    cur_geom_height = state.output_geometries[i]->height;
-    if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
-      || cur_geom_height < 0 ) {
-      continue;
-    }
-
-    if (!(x >= cur_geom_x)) {
-      continue;
-    }
-    if (!(y >= cur_geom_y)) {
-      continue;
-    }
-    if (!(x < cur_geom_x + cur_geom_width)) {
-      continue;
-    }
-    if (!(y < cur_geom_y + cur_geom_height)) {
-      continue;
-    }
-    out_data.output_idx = i;
-    out_data.x = x - cur_geom_x;
-    out_data.y = y - cur_geom_y;
-    out_data.valid = true;
-    break;
-  }
-
-  /* There is a possibility that out_data will contain all zeros; if this
-   * happens, it means that no output covered the requested coordinates in the
-   * compositor's global space. That's a valid thing to tell a caller, so just
-   * return it anyway. */
-  return out_data;
+  return coord_abs_to_local_pure(x, y, state.output_geometries,
+    MAX_SCREEN_COUNT);
 }
 
 static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
   int32_t output_idx) {
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  struct coord out_val = {
-    .x = -1,
-    .y = -1,
-  };
-
   assert(output_idx >= 0);
   assert(output_idx < MAX_SCREEN_COUNT);
-  if (x < 0 || y < 0) {
-    return out_val;
-  }
-
-  if (!state.output_geometries[output_idx]) {
-    return out_val;
-  }
-  cur_geom_x = state.output_geometries[output_idx]->x;
-  cur_geom_y = state.output_geometries[output_idx]->y;
-  cur_geom_width = state.output_geometries[output_idx]->width;
-  cur_geom_height = state.output_geometries[output_idx]->height;
-  if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
-    || cur_geom_height < 0) {
-    return out_val;
-  }
-
-  out_val.x = cur_geom_x + x;
-  out_val.y = cur_geom_y + y;
-  return out_val;
+  return coord_local_to_abs_pure(x, y, state.output_geometries[output_idx]);
 }
 
 /* traverse_line() moved to src/kloak_traverse.inc.h. */
