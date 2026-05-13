@@ -400,6 +400,18 @@ static void recalc_global_space(struct disp_state *param_state) {
       || cur_geom_width < 0 || cur_geom_height < 0) {
       continue;
     }
+    /*
+     * Reject geometries whose corner coordinates would overflow
+     * int32_t arithmetic. Same class of bug as the int32 overflow
+     * the fuzz_geometry harness found in check_point_in_area /
+     * check_screen_touch; production compositors never send such
+     * large outputs, but a hostile compositor could and we should
+     * not exhibit undefined behaviour for it.
+     */
+    if ((int64_t)cur_geom_x + (int64_t)cur_geom_width > INT32_MAX
+      || (int64_t)cur_geom_y + (int64_t)cur_geom_height > INT32_MAX) {
+      continue;
+    }
     screen_list[screen_list_len] = param_state->output_geometries[i];
     screen_list_len++;
     if (cur_geom_x < ul_corner_x) {
