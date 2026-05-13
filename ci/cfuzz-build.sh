@@ -84,37 +84,42 @@ PKG_LIBS="libinput libevdev wayland-client xkbcommon"
 PKG_CFLAGS_VALUE="$(pkg-config --cflags ${PKG_LIBS})"
 PKG_LIBS_VALUE="$(pkg-config --libs ${PKG_LIBS})"
 
-## Dead-strip unreachable code so the harness binary does not
-## carry an NEEDED entry on libinput.so / libwayland-client.so /
-## etc. The fuzz harnesses target pure parsers and never reach
-## handle_libinput_event, applayer_wayland_init, or the other
-## libinput/wayland-dependent functions in kloak.c. With
-## -ffunction-sections + -Wl,--gc-sections the linker drops those
-## sections entirely; --as-needed then prunes the shared libs from
-## NEEDED. Without this, ClusterFuzzLite's run-fuzzers container
-## (which only has libc) cannot launch the binary - "error while
-## loading shared libraries: libinput.so.10".
-SECTION_CFLAGS="-ffunction-sections -fdata-sections"
+## The harness binary needs to find its runtime shared lib deps
+## (libinput / libwayland-client / etc.) inside the OSS-Fuzz
+## run-fuzzers container, which ships only libc-class libs.
+##
+## Earlier iterations tried -ffunction-sections + -Wl,--gc-sections
+## + -Wl,--as-needed to drop the deps from NEEDED entirely (the
+## harnesses target pure parsers, so libinput / wayland code is
+## dead). The strip succeeded for libinput / libevdev / libxkbcommon
+## but not for libwayland-client (wl_*_interface symbols live in
+## the protocol .c files' static interface tables, which the
+## linker keeps as data). Worse, --gc-sections also stripped some
+## sanitizer / coverage instrumentation, tripping CFLite's
+## bad_build_check with "partial coverage instrumentation" and
+## "not compiled with UBSan".
+##
+## Pragmatic fix: leave the deps in NEEDED, set rpath $ORIGIN, and
+## bundle the non-system .so files next to the binary in $OUT/.
 ## $ORIGIN in single-quotes survives shell expansion and reaches
-## the linker literally; at runtime the dynamic loader replaces it
-## with the directory containing the binary, so .so files bundled
-## next to the binary in $OUT/ are found without setting
-## LD_LIBRARY_PATH.
-GC_LDFLAGS="-Wl,--gc-sections -Wl,--as-needed -Wl,-rpath,\$ORIGIN"
+## the linker literally; the dynamic loader replaces it with the
+## binary's directory at runtime, so bundled libs are found
+## without setting LD_LIBRARY_PATH.
+RPATH_LDFLAGS="-Wl,-rpath,\$ORIGIN"
 
 for harness in fuzz/fuzz_*.c; do
   name="$(basename -- "${harness}" .c)"
   printf 'building %s\n' "${name}"
 
   # shellcheck disable=SC2086
-  ${CC} ${CFLAGS} ${SECTION_CFLAGS} \
+  ${CC} ${CFLAGS} \
     -DKLOAK_FUZZING \
     ${PKG_CFLAGS_VALUE} \
     "${harness}" \
     "${PROTO_SRC[@]}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
-    ${GC_LDFLAGS} \
+    ${RPATH_LDFLAGS} \
     -lm -lrt \
     ${PKG_LIBS_VALUE}
 
