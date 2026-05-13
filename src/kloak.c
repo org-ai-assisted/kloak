@@ -72,6 +72,7 @@
 
 #include "kloak.h"
 #include "kloak_geometry.inc.h"
+#include "kloak_inotify.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 
@@ -2094,12 +2095,29 @@ static void release_scheduled_input_events(void) {
   }
 }
 
+static void dispatch_inotify_event(const struct inotify_event *ie) {
+  /* parse_inotify_buffer in kloak_inotify.inc.h has already
+   * validated that ie + sizeof(struct inotify_event) + ie->len
+   * is within bounds, but it does NOT bound how long the name
+   * field is. The strncmp below reads strlen("event") + 1 = 6
+   * bytes; without the explicit length guard, a kernel- or
+   * fuzz-supplied event with ie->len < 6 would race the
+   * strncmp into the next event's header. */
+  if (ie->len < strlen("event") + 1) {
+    return;
+  }
+  if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
+    if (ie->mask & IN_CREATE) {
+      attach_input_device(ie->name);
+    } else {
+      detach_input_device(ie->name);
+    }
+  }
+}
+
 static void handle_inotify_events(void) {
   static char *read_buf = NULL;
   ssize_t read_len = 0;
-  ssize_t rem_len = 0;
-  ssize_t struct_len = 0;
-  struct inotify_event *ie;
 
   if (read_buf == NULL) {
     read_buf = safe_calloc(INOTIFY_READ_BUF_LEN, sizeof(char));
@@ -2119,41 +2137,7 @@ static void handle_inotify_events(void) {
     break;
   }
 
-  ie = (void *)(read_buf);
-  rem_len = read_len;
-  while (true) {
-    assert(rem_len >= (ssize_t)(sizeof(struct inotify_event)));
-    assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
-    struct_len = ((ssize_t)(sizeof(struct inotify_event)) + (ssize_t)(ie->len));
-    assert(struct_len <= rem_len);
-    rem_len -= struct_len;
-    assert(rem_len >= 0);
-
-    if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
-      if (ie->mask & IN_CREATE) {
-        attach_input_device(ie->name);
-      } else {
-        detach_input_device(ie->name);
-      }
-    }
-
-    if (rem_len <= 0) {
-      break;
-    }
-
-    /*
-     * We can safely disable cast alignment checks here because the kernel
-     * should only provide us properly aligned events. Quoting the manpage:
-     *
-     *     ...This filename is null-terminated, and may include further null
-     *     bytes ('\0') to align subsequent reads to a suitable address
-     *     boundary.
-     */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-align"
-    ie = (struct inotify_event *)((char *)(ie) + struct_len);
-#pragma GCC diagnostic pop
-  }
+  parse_inotify_buffer(read_buf, read_len, dispatch_inotify_event);
 }
 
 
