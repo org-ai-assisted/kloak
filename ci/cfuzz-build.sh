@@ -36,10 +36,25 @@
 ## class environment, including OSS-Fuzz's minimal run-fuzzers
 ## container.
 
+## R-010 strict-mode quintet. inherit_errexit makes '$()' subshells
+## honour errexit; shift_verbose logs when shift runs past argv end.
 set -o errexit
 set -o nounset
 set -o pipefail
 set -o errtrace
+shopt -s inherit_errexit
+shopt -s shift_verbose
+
+## R-040 / R-110: this script runs inside the OSS-Fuzz base-
+## builder container, which does NOT ship helper-scripts, so
+## 'log' / 'die' are not available. printf with the fixed
+## '%s\n' format from R-030 is the closest we can get without
+## sourcing files that do not exist in the build environment.
+##
+## R-120: 'rm -rf -- ...' on a mktemp -d path further below is
+## marked '## style-ok: no-safe-rm' for the same reason; safe-rm
+## is not installed in the OSS-Fuzz container either, and the
+## paths we delete are confined to a fresh mktemp dir we own.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -49,7 +64,7 @@ cd -- "${REPO_ROOT}"
 
 if [ -z "${OUT:-}" ]; then
   OUT="${REPO_ROOT}/out"
-  mkdir -p -- "${OUT}"
+  mkdir --parents -- "${OUT}"
 fi
 if [ -z "${CC:-}" ]; then
   CC="clang"
@@ -70,8 +85,8 @@ fi
 ## print-kloak-ldflags targets already handle the gcc-vs-clang and
 ## x86_64-vs-aarch64 conditionals; we just append the result.
 
-KLOAK_CFLAGS_FROM_MAKEFILE="$(make -s -C "${REPO_ROOT}" CC="${CC}" print-kloak-cflags)"
-KLOAK_LDFLAGS_FROM_MAKEFILE="$(make -s -C "${REPO_ROOT}" CC="${CC}" print-kloak-ldflags)"
+KLOAK_CFLAGS_FROM_MAKEFILE="$(make --silent --directory "${REPO_ROOT}" CC="${CC}" print-kloak-cflags)"
+KLOAK_LDFLAGS_FROM_MAKEFILE="$(make --silent --directory "${REPO_ROOT}" CC="${CC}" print-kloak-ldflags)"
 CFLAGS="${CFLAGS} ${KLOAK_CFLAGS_FROM_MAKEFILE}"
 LDFLAGS="${LDFLAGS} ${KLOAK_LDFLAGS_FROM_MAKEFILE}"
 
@@ -88,7 +103,7 @@ LDFLAGS="${LDFLAGS} ${KLOAK_LDFLAGS_FROM_MAKEFILE}"
 for harness in fuzz/fuzz_*.c; do
   name="$(basename -- "${harness}" .c)"
 
-  printf 'building %s\n' "${name}"
+  printf '%s\n' "building ${name}"
 
   # shellcheck disable=SC2086
   ${CC} ${CFLAGS} \
@@ -97,7 +112,7 @@ for harness in fuzz/fuzz_*.c; do
     ${LIB_FUZZING_ENGINE} \
     ${LDFLAGS}
 
-  printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
+  printf '%s\n' "compiled ${name} -> ${OUT}/${name}"
 
   ## OSS-Fuzz / ClusterFuzzLite convention: a seed corpus for
   ## fuzzer 'X' is packaged as $OUT/X_seed_corpus.zip. CFLite
@@ -118,13 +133,15 @@ for harness in fuzz/fuzz_*.c; do
   if [ -f "fuzz/${name}_seeds.py" ]; then
     seed_tmpdir="$(mktemp -d)"
     if python3 "fuzz/${name}_seeds.py" "${seed_tmpdir}" \
-      && [ -n "$(ls -A "${seed_tmpdir}" 2>/dev/null)" ]; then
+      && [ -n "$(ls --almost-all "${seed_tmpdir}" 2>/dev/null)" ]; then
       # shellcheck disable=SC2164
-      (cd "${seed_tmpdir}" && zip -q -r "${OUT}/${name}_seed_corpus.zip" .)
-      printf 'packaged seed corpus -> %s_seed_corpus.zip (%d files)\n' \
-        "${name}" "$(ls -1 "${seed_tmpdir}" | wc -l)"
+      (cd "${seed_tmpdir}" && zip --quiet --recurse-paths "${OUT}/${name}_seed_corpus.zip" .)
+      seed_count="$(ls --format=single-column "${seed_tmpdir}" | wc --lines)"
+      printf '%s\n' "packaged seed corpus -> ${name}_seed_corpus.zip (${seed_count} files)"
     fi
-    rm -rf -- "${seed_tmpdir}"
+    ## style-ok: no-safe-rm - safe-rm not present in OSS-Fuzz
+    ## base-builder container; path is a fresh mktemp -d we own.
+    rm --recursive --force -- "${seed_tmpdir}"
   fi
 done
 
@@ -153,14 +170,16 @@ for binary in "${OUT}"/fuzz_*; do
       /lib/x86_64-linux-gnu/librt.* | \
       /lib/x86_64-linux-gnu/ld-* | \
       /lib64/*)
-        ;;  # system - leave to the run container's loader
+        ## system - leave to the run container's loader
+        true
+        ;;
       *)
         dest="${OUT}/$(basename -- "${so}")"
         if [ ! -e "${dest}" ]; then
-          cp -L "${so}" "${dest}"
+          cp --dereference -- "${so}" "${dest}"
         fi
         ;;
     esac
   done
 done
-ls -1 "${OUT}/" | grep -E '\.so' || true
+ls --format=single-column "${OUT}/" | grep --extended-regexp '\.so' || true
