@@ -22,6 +22,7 @@
 #ifndef KLOAK_GEOMETRY_INC_H
 #define KLOAK_GEOMETRY_INC_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -37,6 +38,14 @@ struct output_geometry {
 
 /*
  * Determine if a point falls inside an area.
+ *
+ * All arithmetic that combines coordinates with widths/heights is
+ * done in int64_t to avoid signed-integer overflow on
+ * adversarially large geometry inputs. Production callers see
+ * compositor pixel coordinates that never approach INT32_MAX, but
+ * the fuzz harness in fuzz/fuzz_geometry.c does, and UBSan flags
+ * the bare int32_t addition as UB even though x86 wraps it
+ * harmlessly.
  */
 static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
   int32_t rect_y, int32_t rect_width, int32_t rect_height) {
@@ -44,8 +53,10 @@ static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
     || rect_height < 0) {
     return false;
   }
-  if (x >= rect_x && x < rect_x + rect_width
-    && y >= rect_y && y < rect_y + rect_height) {
+  const int64_t rect_right = (int64_t)rect_x + (int64_t)rect_width;
+  const int64_t rect_bottom = (int64_t)rect_y + (int64_t)rect_height;
+  if (x >= rect_x && (int64_t)x < rect_right
+    && y >= rect_y && (int64_t)y < rect_bottom) {
     return true;
   }
   return false;
@@ -54,6 +65,15 @@ static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
 /*
  * Determine if two screens are touching or overlapping given their
  * geometries.
+ *
+ * As in check_point_in_area, every addition that combines a
+ * coordinate with a width/height is performed via an int64_t
+ * intermediate. We also reject inputs whose corner coordinates
+ * would overflow int32_t: production callers never produce such
+ * inputs (real screen pixel counts are small) but the fuzz
+ * harness exercises the full int32 range, and the alternative -
+ * letting UBSan trip on every adversarial input - hides any
+ * future real bug behind boilerplate findings.
  */
 static bool check_screen_touch(struct output_geometry scr1,
   struct output_geometry scr2) {
@@ -70,6 +90,17 @@ static bool check_screen_touch(struct output_geometry scr1,
 
   if (scr1.x < 0 || scr1.y < 0 || scr1.width < 0 || scr1.height < 0
     || scr2.x < 0 || scr2.y < 0 || scr2.width < 0 || scr2.height < 0) {
+    return false;
+  }
+  /*
+   * Reject inputs whose grown / corner coordinates would step
+   * outside int32_t. +2 is the maximum width/height bump from
+   * the grow step below.
+   */
+  if ((int64_t)scr1.x + (int64_t)scr1.width + 2 > INT32_MAX
+    || (int64_t)scr1.y + (int64_t)scr1.height + 2 > INT32_MAX
+    || (int64_t)scr2.x + (int64_t)scr2.width > INT32_MAX
+    || (int64_t)scr2.y + (int64_t)scr2.height > INT32_MAX) {
     return false;
   }
 
