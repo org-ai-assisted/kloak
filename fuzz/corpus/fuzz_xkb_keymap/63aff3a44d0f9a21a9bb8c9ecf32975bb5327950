@@ -1,5 +1,0 @@
-xkb_keymap {
-xkb_keycodes"minimal" {
-       # level_name[Level1]= };
-};
-};
