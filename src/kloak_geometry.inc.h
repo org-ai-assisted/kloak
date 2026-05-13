@@ -47,14 +47,17 @@ struct output_geometry {
  * the bare int32_t addition as UB even though x86 wraps it
  * harmlessly.
  */
-static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
+static __attribute__((unused))
+bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
   int32_t rect_y, int32_t rect_width, int32_t rect_height) {
+  int64_t rect_right = 0;
+  int64_t rect_bottom = 0;
   if (x < 0 || y < 0 || rect_x < 0 || rect_y < 0 || rect_width < 0
     || rect_height < 0) {
     return false;
   }
-  const int64_t rect_right = (int64_t)rect_x + (int64_t)rect_width;
-  const int64_t rect_bottom = (int64_t)rect_y + (int64_t)rect_height;
+  rect_right = (int64_t)rect_x + (int64_t)rect_width;
+  rect_bottom = (int64_t)rect_y + (int64_t)rect_height;
   if (x >= rect_x && (int64_t)x < rect_right
     && y >= rect_y && (int64_t)y < rect_bottom) {
     return true;
@@ -75,7 +78,8 @@ static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
  * letting UBSan trip on every adversarial input - hides any
  * future real bug behind boilerplate findings.
  */
-static bool check_screen_touch(struct output_geometry scr1,
+static __attribute__((unused))
+bool check_screen_touch(struct output_geometry scr1,
   struct output_geometry scr2) {
   /*
    * We check for both touching and overlapping screens. Screens are

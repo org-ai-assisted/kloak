@@ -74,6 +74,8 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  char *buf = NULL;
+
   /* Reject inputs with embedded NUL bytes: parse_esc_key_str
    * treats its argument as a C string, so the libFuzzer-supplied
    * input slice must be losslessly convertible. */
@@ -81,7 +83,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
   }
 
-  char *buf = malloc(size + 1U);
+  buf = malloc(size + 1U);
   if (buf == NULL) {
     return 0;
   }

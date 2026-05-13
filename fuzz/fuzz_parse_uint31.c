@@ -49,20 +49,24 @@
 static const int kBases[] = {10, 16, 8, 2};
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  int base = 10;
+  size_t slen = 0;
+  char *buf = NULL;
+  int32_t out = 0;
+
   if (size < 1U) {
     return 0;
   }
-  const int base = kBases[data[0] & 0x3];
-  const size_t slen = size - 1U;
+  base = kBases[data[0] & 0x3];
+  slen = size - 1U;
 
-  char *buf = malloc(slen + 1U);
+  buf = malloc(slen + 1U);
   if (buf == NULL) {
     return 0;
   }
   memcpy(buf, data + 1, slen);
   buf[slen] = '\0';
 
-  int32_t out = 0;
   (void)parse_uint31_arg(buf, base, &out);
 
   free(buf);

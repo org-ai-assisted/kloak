@@ -31,11 +31,11 @@
  * 0 and clamps the cursor so the caller's next read is a no-op
  * too. */
 static int32_t take_int32(const uint8_t *data, size_t size, size_t *cursor) {
+  int32_t v = 0;
   if (*cursor + sizeof(int32_t) > size) {
     *cursor = size;
     return 0;
   }
-  int32_t v = 0;
   memcpy(&v, data + *cursor, sizeof(int32_t));
   *cursor += sizeof(int32_t);
   return v;
@@ -43,29 +43,33 @@ static int32_t take_int32(const uint8_t *data, size_t size, size_t *cursor) {
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   size_t c = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t rx = 0;
+  int32_t ry = 0;
+  int32_t rw = 0;
+  int32_t rh = 0;
+  struct output_geometry a = { 0 };
+  struct output_geometry b = { 0 };
 
   /* check_point_in_area: 6 int32_t args. */
-  int32_t x      = take_int32(data, size, &c);
-  int32_t y      = take_int32(data, size, &c);
-  int32_t rx     = take_int32(data, size, &c);
-  int32_t ry     = take_int32(data, size, &c);
-  int32_t rw     = take_int32(data, size, &c);
-  int32_t rh     = take_int32(data, size, &c);
+  x  = take_int32(data, size, &c);
+  y  = take_int32(data, size, &c);
+  rx = take_int32(data, size, &c);
+  ry = take_int32(data, size, &c);
+  rw = take_int32(data, size, &c);
+  rh = take_int32(data, size, &c);
   (void)check_point_in_area(x, y, rx, ry, rw, rh);
 
   /* check_screen_touch: 2 output_geometry structs (4 int32_t each). */
-  struct output_geometry a = {
-    .x      = take_int32(data, size, &c),
-    .y      = take_int32(data, size, &c),
-    .width  = take_int32(data, size, &c),
-    .height = take_int32(data, size, &c),
-  };
-  struct output_geometry b = {
-    .x      = take_int32(data, size, &c),
-    .y      = take_int32(data, size, &c),
-    .width  = take_int32(data, size, &c),
-    .height = take_int32(data, size, &c),
-  };
+  a.x      = take_int32(data, size, &c);
+  a.y      = take_int32(data, size, &c);
+  a.width  = take_int32(data, size, &c);
+  a.height = take_int32(data, size, &c);
+  b.x      = take_int32(data, size, &c);
+  b.y      = take_int32(data, size, &c);
+  b.width  = take_int32(data, size, &c);
+  b.height = take_int32(data, size, &c);
   (void)check_screen_touch(a, b);
 
   return 0;

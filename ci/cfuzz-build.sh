@@ -11,19 +11,30 @@
 ##
 ## 1. Invoked by .clusterfuzzlite/build.sh inside the OSS-Fuzz
 ##    base-builder container. $SRC / $OUT / $CC / $CFLAGS /
-##    $LIB_FUZZING_ENGINE are pre-set by the container.
+##    $LIB_FUZZING_ENGINE are pre-set by the container (clang +
+##    sanitizer wiring + -O1 / -fno-omit-frame-pointer).
 ##
 ## 2. Invoked by ci/cfuzz-run.sh on the host (no Docker, no
 ##    sanitizer-aware $CC). Picks sensible defaults: clang +
 ##    -fsanitize=fuzzer,address,undefined. Useful for local
 ##    developer iteration without spinning up Docker.
 ##
-## The harnesses include only src/kloak_parsers.inc.h - the
-## pure-parser surface factored out of kloak.c. No libinput /
-## wayland / libevdev / xkbcommon linkage, no wayland-scanner
-## codegen, no rpath / library bundling - the resulting binaries
-## launch in any libc-class environment, including OSS-Fuzz's
-## minimal run-fuzzers container.
+## In both modes we pull kloak's upstream hardening flag set
+## (WARN_CFLAGS + FORTIFY_CFLAGS + BIN_CFLAGS + KLOAK_LDFLAGS)
+## directly from the Makefile via the print-kloak-cflags /
+## print-kloak-ldflags targets, then APPEND them to whatever
+## $CFLAGS / $LDFLAGS the caller already supplied. Append rather
+## than replace so libFuzzer's sanitizer wiring stays intact, and
+## query-the-Makefile rather than re-spelling the flag list so
+## there's a single source of truth - if upstream tightens
+## hardening, the fuzz harnesses get it for free.
+##
+## The harnesses include only kloak's pure parser / geometry /
+## inotify / esc_combo surfaces. No libinput / wayland / libevdev
+## / xkbcommon linkage, no wayland-scanner codegen, no rpath /
+## library bundling - the resulting binaries launch in any libc-
+## class environment, including OSS-Fuzz's minimal run-fuzzers
+## container.
 
 set -o errexit
 set -o nounset
@@ -46,9 +57,23 @@ fi
 if [ -z "${CFLAGS:-}" ]; then
   CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined"
 fi
+if [ -z "${LDFLAGS:-}" ]; then
+  LDFLAGS=""
+fi
 if [ -z "${LIB_FUZZING_ENGINE:-}" ]; then
   LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
 fi
+
+## --- Pull kloak upstream hardening flags from the Makefile ----------
+##
+## Single source of truth: ../Makefile. The print-kloak-cflags /
+## print-kloak-ldflags targets already handle the gcc-vs-clang and
+## x86_64-vs-aarch64 conditionals; we just append the result.
+
+KLOAK_CFLAGS_FROM_MAKEFILE="$(make -s -C "${REPO_ROOT}" CC="${CC}" print-kloak-cflags)"
+KLOAK_LDFLAGS_FROM_MAKEFILE="$(make -s -C "${REPO_ROOT}" CC="${CC}" print-kloak-ldflags)"
+CFLAGS="${CFLAGS} ${KLOAK_CFLAGS_FROM_MAKEFILE}"
+LDFLAGS="${LDFLAGS} ${KLOAK_LDFLAGS_FROM_MAKEFILE}"
 
 ## --- Harness compile loop -------------------------------------------
 ##
@@ -69,7 +94,8 @@ for harness in fuzz/fuzz_*.c; do
   ${CC} ${CFLAGS} \
     "${harness}" \
     -o "${OUT}/${name}" \
-    ${LIB_FUZZING_ENGINE}
+    ${LIB_FUZZING_ENGINE} \
+    ${LDFLAGS}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
 
