@@ -51,16 +51,38 @@ if [ -z "${LIB_FUZZING_ENGINE:-}" ]; then
 fi
 
 ## --- Harness compile loop -------------------------------------------
+##
+## Per-harness extra flags / libs. fuzz_xkb_keymap links against
+## libxkbcommon (the parser surface kloak feeds with compositor-
+## supplied keymap strings); the other harnesses are libc-only.
+##
+## We do not use a global '-lxkbcommon -Wl,--as-needed' because
+## CFLite's run-fuzzers:v1 container is not guaranteed to ship
+## libxkbcommon.so; keeping the dep local to the one harness that
+## needs it makes it obvious where to focus if a future bump of
+## the runtime container breaks library resolution.
 
 for harness in fuzz/fuzz_*.c; do
   name="$(basename -- "${harness}" .c)"
+
+  extra_cflags=""
+  extra_libs=""
+  case "${name}" in
+    fuzz_xkb_keymap)
+      extra_cflags="$(pkg-config --cflags xkbcommon)"
+      extra_libs="$(pkg-config --libs xkbcommon)"
+      ;;
+  esac
+
   printf 'building %s\n' "${name}"
 
   # shellcheck disable=SC2086
   ${CC} ${CFLAGS} \
+    ${extra_cflags} \
     "${harness}" \
     -o "${OUT}/${name}" \
-    ${LIB_FUZZING_ENGINE}
+    ${LIB_FUZZING_ENGINE} \
+    ${extra_libs}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
 done

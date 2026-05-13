@@ -40,6 +40,17 @@
 ##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/latest
 FROM gcr.io/oss-fuzz-base/base-builder@sha256:5ca8fa8bd9f933429af8f4df2d2e268e0d1e2a4fc6fd6e0aa5c6b3f53dfc99c5
 
+## fuzz_xkb_keymap links against libxkbcommon, the parser surface
+## kb_handle_keymap() feeds with compositor-supplied keymap
+## strings. Other harnesses are libc-only and do not need any
+## apt installs. pkg-config is required by ci/cfuzz-build.sh to
+## resolve xkbcommon's compile / link flags.
+RUN apt-get update && \
+    apt-get install --yes --no-install-recommends \
+      libxkbcommon-dev \
+      pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY . $SRC/kloak
 COPY .clusterfuzzlite/build.sh $SRC/build.sh
 WORKDIR $SRC/kloak
