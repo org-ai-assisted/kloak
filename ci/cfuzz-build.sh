@@ -67,10 +67,15 @@ for harness in fuzz/fuzz_*.c; do
 
   extra_cflags=""
   extra_libs=""
+  extra_ldflags=""
   case "${name}" in
     fuzz_xkb_keymap)
       extra_cflags="$(pkg-config --cflags xkbcommon)"
       extra_libs="$(pkg-config --libs xkbcommon)"
+      ## rpath $ORIGIN so the binary finds libxkbcommon.so.0
+      ## bundled next to it in $OUT/ at runtime. $ORIGIN survives
+      ## bash single-quoting and reaches the linker literally.
+      extra_ldflags='-Wl,-rpath,$ORIGIN'
       ;;
   esac
 
@@ -82,7 +87,45 @@ for harness in fuzz/fuzz_*.c; do
     "${harness}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
+    ${extra_ldflags} \
     ${extra_libs}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
 done
+
+## Bundle non-system shared libs alongside each harness so the
+## OSS-Fuzz ClusterFuzzLite run-fuzzers:v1 container - which ships
+## only libc-class runtime libs - can launch them. Walk every
+## binary's ldd output and copy anything not in the run image's
+## guaranteed set into $OUT/. For libc-only harnesses (the four
+## simple parsers), the loop is a no-op.
+##
+## libc / libm / libpthread / libdl / libresolv / libgcc_s /
+## libstdc++ / librt / ld-* are part of the run container's base
+## image and intentionally NOT bundled - copying them risks ABI
+## skew on the loader side.
+for binary in "${OUT}"/fuzz_*; do
+  [ -x "${binary}" ] || continue
+  ldd "${binary}" 2>/dev/null | awk '/=> \// {print $3}' | while read -r so; do
+    case "${so}" in
+      /lib/x86_64-linux-gnu/libc.* | \
+      /lib/x86_64-linux-gnu/libm.* | \
+      /lib/x86_64-linux-gnu/libpthread.* | \
+      /lib/x86_64-linux-gnu/libdl.* | \
+      /lib/x86_64-linux-gnu/libresolv.* | \
+      /lib/x86_64-linux-gnu/libgcc_s.* | \
+      /lib/x86_64-linux-gnu/libstdc++.* | \
+      /lib/x86_64-linux-gnu/librt.* | \
+      /lib/x86_64-linux-gnu/ld-* | \
+      /lib64/*)
+        ;;  # system - leave to the run container's loader
+      *)
+        dest="${OUT}/$(basename -- "${so}")"
+        if [ ! -e "${dest}" ]; then
+          cp -L "${so}" "${dest}"
+        fi
+        ;;
+    esac
+  done
+done
+ls -1 "${OUT}/" | grep -E '\.so' || true
