@@ -71,11 +71,19 @@ struct kloak_layer_dims compute_layer_dims_pure(uint32_t width,
 
   stride64 = (int64_t)width * 4;
   size64 = stride64 * (int64_t)height;
-  total64 = size64 * KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES;
 
+  /* size64 must fit in int32_t. Also bound the post-frames
+   * total at int32_t to keep 'layer->size * MAX_UNRELEASED_
+   * FRAMES' (which kloak.c hands to mmap / wl_shm_create_pool)
+   * representable. Computing total64 BEFORE the size64 bound
+   * is checked would let total64 = size64 * 3 overflow int64
+   * itself (size64 max = INT32_MAX * INT32_MAX = 4.6e18, * 3
+   * = 1.4e19 > INT64_MAX) - which fuzz_layer_dims caught on
+   * the first CFLite run. */
   if (size64 < 0 || size64 > INT32_MAX) {
     return out;
   }
+  total64 = size64 * KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES;
   if (total64 < 0 || total64 > INT32_MAX) {
     return out;
   }
