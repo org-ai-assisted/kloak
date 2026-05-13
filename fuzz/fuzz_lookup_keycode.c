@@ -13,14 +13,14 @@
  * than to find a complex parsing bug.
  */
 
-#ifndef KLOAK_FUZZING
-#define KLOAK_FUZZING
-#endif
-#include "../src/kloak.c"
+/*
+ * See fuzz_parse_uint31.c for the design notes on why the
+ * harnesses include src/kloak_parsers.inc.h rather than the
+ * whole kloak.c.
+ */
+#include "../src/kloak_parsers.inc.h"
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   char *buf = malloc(size + 1U);

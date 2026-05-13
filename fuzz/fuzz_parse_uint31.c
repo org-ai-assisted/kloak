@@ -22,14 +22,23 @@
  * fuzzing.
  */
 
-#ifndef KLOAK_FUZZING
-#define KLOAK_FUZZING
-#endif
-#include "../src/kloak.c"
+/*
+ * Earlier iterations of this harness pulled in the full kloak.c
+ * via #include with a KLOAK_FUZZING guard around main(). That
+ * left the binary with NEEDED entries on libinput / libwayland-
+ * client / libevdev / libxkbcommon, which the OSS-Fuzz
+ * ClusterFuzzLite run-fuzzers container does not ship - bundle +
+ * rpath workarounds were defeated by bad_build_check moving the
+ * binary to a temp dir away from its bundled libs.
+ *
+ * Solution: kloak.c's parsers were factored out into
+ * src/kloak_parsers.inc.h. The harness includes only that
+ * header; the resulting binary has zero wayland / libinput
+ * linkage and launches fine inside the run-fuzzers container.
+ */
+#include "../src/kloak_parsers.inc.h"
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
 /*
  * Bases parse_uint31_arg supports in practice are 10 (CLI integer

@@ -61,12 +61,14 @@ struct li_device_info {
 };
 
 /*
- * Defines an evdev key code and the corresponding string.
+ * struct key_name_value, key_table[], parse_uint31_arg,
+ * parse_uint32_arg, and lookup_keycode were factored out into
+ * src/kloak_parsers.inc.h. kloak.c #include's that header below
+ * (after this kloak.h is included). The fuzz harnesses include
+ * only kloak_parsers.inc.h, which keeps them free of
+ * libinput/wayland linkage so they run in the OSS-Fuzz run-fuzzers
+ * container.
  */
-struct key_name_value {
-    const char *name;
-    const uint32_t value;
-};
 
 /*
  * Defines a screen-local layer that can be drawn on. Each screen has one

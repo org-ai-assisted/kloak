@@ -10,14 +10,16 @@
  * KLOAK_FUZZING approach.
  */
 
-#ifndef KLOAK_FUZZING
-#define KLOAK_FUZZING
-#endif
-#include "../src/kloak.c"
+/*
+ * See fuzz_parse_uint31.c for the design notes on why the
+ * harnesses include src/kloak_parsers.inc.h rather than the
+ * whole kloak.c (no wayland / libinput linkage in the fuzz
+ * binary => no missing-shared-lib failures inside the OSS-Fuzz
+ * run-fuzzers container).
+ */
+#include "../src/kloak_parsers.inc.h"
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+#include <stddef.h>
 
 static const int kBases[] = {16, 10, 8, 2};
 
