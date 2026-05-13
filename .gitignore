@@ -1,6 +1,20 @@
 /kloak
 /out/
 eventcap
+
+## wayland-scanner generated files (Makefile + ci/cfuzz-build.sh
+## regenerate these from protocol/*.xml at build time; the
+## Makefile's clean target also removes them).
+/src/xdg-shell-protocol.c
+/src/xdg-shell-protocol.h
+/src/xdg-output-protocol.c
+/src/xdg-output-protocol.h
+/src/wlr-layer-shell.c
+/src/wlr-layer-shell.h
+/src/wlr-virtual-pointer.c
+/src/wlr-virtual-pointer.h
+/src/virtual-keyboard.c
+/src/virtual-keyboard.h
 cmake-build-debug/
 .idea/
 *.o
