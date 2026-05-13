@@ -72,6 +72,7 @@
 
 #include "kloak.h"
 #include "kloak_geometry.inc.h"
+#include "kloak_recalc.inc.h"
 #include "kloak_coord.inc.h"
 #include "kloak_inotify.inc.h"
 #include "kloak_pixbuf.inc.h"
@@ -372,122 +373,29 @@ static int64_t random_between(int64_t lower, int64_t upper) {
 }
 
 
+/* recalc_global_space()'s body moved to src/kloak_recalc.inc.h
+ * as recalc_global_space_pure(); this wrapper does the same
+ * thing on the disp_state global. The gap-detection panic stays
+ * here (the pure helper returns KLOAK_RECALC_GAP instead so it
+ * is callable from the fuzz harness). */
 static void recalc_global_space(struct disp_state *param_state) {
-  int32_t ul_corner_x = INT32_MAX;
-  int32_t ul_corner_y = INT32_MAX;
-  int32_t br_corner_x = 0;
-  int32_t br_corner_y = 0;
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  int32_t temp_br_x = 0;
-  int32_t temp_br_y = 0;
-  struct output_geometry *screen_list[MAX_SCREEN_COUNT];
-  ssize_t screen_list_len = 0;
-  struct output_geometry *conn_screen_list[MAX_SCREEN_COUNT];
-  ssize_t conn_screen_list_len = 0;
-  bool screen_in_conn_list = false;
-  struct output_geometry *conn_screen = NULL;
-  struct output_geometry *cur_screen = NULL;
-
-  for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (!param_state->output_geometries[i]) {
-      continue;
-    }
-    cur_geom_x = param_state->output_geometries[i]->x;
-    cur_geom_y = param_state->output_geometries[i]->y;
-    cur_geom_width = param_state->output_geometries[i]->width;
-    cur_geom_height = param_state->output_geometries[i]->height;
-    if (cur_geom_x < 0 || cur_geom_y < 0
-      || cur_geom_width < 0 || cur_geom_height < 0) {
-      continue;
-    }
-    /*
-     * Reject geometries whose corner coordinates would overflow
-     * int32_t arithmetic. Same class of bug as the int32 overflow
-     * the fuzz_geometry harness found in check_point_in_area /
-     * check_screen_touch; production compositors never send such
-     * large outputs, but a hostile compositor could and we should
-     * not exhibit undefined behaviour for it.
-     */
-    if ((int64_t)cur_geom_x + (int64_t)cur_geom_width > INT32_MAX
-      || (int64_t)cur_geom_y + (int64_t)cur_geom_height > INT32_MAX) {
-      continue;
-    }
-    screen_list[screen_list_len] = param_state->output_geometries[i];
-    screen_list_len++;
-    if (cur_geom_x < ul_corner_x) {
-      ul_corner_x = cur_geom_x;
-    }
-    if (cur_geom_y < ul_corner_y) {
-      ul_corner_y = cur_geom_y;
-    }
-    temp_br_x = cur_geom_x + cur_geom_width;
-    temp_br_y = cur_geom_y + cur_geom_height;
-    if (temp_br_x > br_corner_x) {
-      br_corner_x = temp_br_x;
-    }
-    if (temp_br_y > br_corner_y) {
-      br_corner_y = temp_br_y;
-    }
+  struct kloak_recalc_result r = recalc_global_space_pure(
+    param_state->output_geometries, MAX_SCREEN_COUNT);
+  switch (r.status) {
+    case KLOAK_RECALC_INCOMPLETE:
+      /* Silently fail if we haven't gotten a valid state yet */
+      return;
+    case KLOAK_RECALC_GAP:
+      fprintf(stderr,
+        "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
+      exit(1);
+    case KLOAK_RECALC_OK:
+      param_state->global_space_width = r.global_space_width;
+      param_state->global_space_height = r.global_space_height;
+      param_state->pointer_space_x = r.pointer_space_x;
+      param_state->pointer_space_y = r.pointer_space_y;
+      return;
   }
-
-  /* Silently fail if we haven't gotten a valid state yet */
-  if (screen_list_len <= 0) {
-    return;
-  }
-  if (ul_corner_x > br_corner_x) {
-    return;
-  }
-  if (ul_corner_y > br_corner_y) {
-    return;
-  }
-
-  conn_screen_list[0] = screen_list[0];
-  conn_screen_list_len = 1;
-
-  /*
-   * Check for gaps between the screens. We don't support running if gaps are
-   * present. To do this, we start with an arbitrary screen, then find all
-   * screens touching it, then find all screens touching those screens, and so
-   * on, until we can't find any more screens touching whatever "zone" we
-   * started in. If the number of connected screens is equal to the number of
-   * attached screens, then all screens are connected, otherwise there is a
-   * gap somewhere.
-   */
-  for (ssize_t i = 0; i < conn_screen_list_len; i++) {
-    for (ssize_t j = 0; j < screen_list_len; j++) {
-      screen_in_conn_list = false;
-      for (ssize_t k = 0; k < conn_screen_list_len; k++) {
-        if (screen_list[j] == conn_screen_list[k]) {
-          screen_in_conn_list = true;
-          break;
-        }
-      }
-      if (screen_in_conn_list) {
-        continue;
-      }
-      conn_screen = conn_screen_list[i];
-      cur_screen = screen_list[j];
-      if (check_screen_touch(*conn_screen, *cur_screen)) {
-        /* Found a touching screen! */
-        conn_screen_list[conn_screen_list_len] = cur_screen;
-        conn_screen_list_len++;
-      }
-    }
-  }
-
-  if (conn_screen_list_len != screen_list_len) {
-    fprintf(stderr,
-      "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
-    exit(1);
-  }
-
-  param_state->global_space_width = br_corner_x;
-  param_state->global_space_height = br_corner_y;
-  param_state->pointer_space_x = ul_corner_x;
-  param_state->pointer_space_y = ul_corner_y;
 }
 
 static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
