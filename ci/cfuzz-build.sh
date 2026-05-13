@@ -84,18 +84,32 @@ PKG_LIBS="libinput libevdev wayland-client xkbcommon"
 PKG_CFLAGS_VALUE="$(pkg-config --cflags ${PKG_LIBS})"
 PKG_LIBS_VALUE="$(pkg-config --libs ${PKG_LIBS})"
 
+## Dead-strip unreachable code so the harness binary does not
+## carry an NEEDED entry on libinput.so / libwayland-client.so /
+## etc. The fuzz harnesses target pure parsers and never reach
+## handle_libinput_event, applayer_wayland_init, or the other
+## libinput/wayland-dependent functions in kloak.c. With
+## -ffunction-sections + -Wl,--gc-sections the linker drops those
+## sections entirely; --as-needed then prunes the shared libs from
+## NEEDED. Without this, ClusterFuzzLite's run-fuzzers container
+## (which only has libc) cannot launch the binary - "error while
+## loading shared libraries: libinput.so.10".
+SECTION_CFLAGS="-ffunction-sections -fdata-sections"
+GC_LDFLAGS="-Wl,--gc-sections -Wl,--as-needed"
+
 for harness in fuzz/fuzz_*.c; do
   name="$(basename -- "${harness}" .c)"
   printf 'building %s\n' "${name}"
 
   # shellcheck disable=SC2086
-  ${CC} ${CFLAGS} \
+  ${CC} ${CFLAGS} ${SECTION_CFLAGS} \
     -DKLOAK_FUZZING \
     ${PKG_CFLAGS_VALUE} \
     "${harness}" \
     "${PROTO_SRC[@]}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
+    ${GC_LDFLAGS} \
     -lm -lrt \
     ${PKG_LIBS_VALUE}
 
