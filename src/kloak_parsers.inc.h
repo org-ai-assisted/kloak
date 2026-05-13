@@ -362,6 +362,55 @@ static void reset_esc_key_state(void) {
   esc_key_list_len = 0;
 }
 
+/*
+ * Pure panic-combo state-machine update, factored out of
+ * register_esc_combo_event() in kloak.c so it can be fuzzed
+ * without libinput linkage. The function takes the esc-key
+ * state as explicit parameters rather than reading the module-
+ * scope globals; the production caller wires the globals
+ * through.
+ *
+ * Behavioural contract: for each combo in 'list', if 'key'
+ * matches any of its sub-tokens, set active[i] = pressed.
+ * Returns true iff every combo's active[] is true, i.e. the
+ * panic combo is fully held. The production caller calls
+ * exit(0) on true; the fuzz harness only observes.
+ */
+static bool esc_combo_update(uint32_t key, bool pressed,
+  uint32_t **list, const size_t *sublist_lens, size_t list_len,
+  bool *active) __attribute__((unused));
+static bool esc_combo_update(uint32_t key, bool pressed,
+  uint32_t **list, const size_t *sublist_lens, size_t list_len,
+  bool *active) {
+  if (list == NULL || sublist_lens == NULL || active == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < list_len; i++) {
+    if (list[i] == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < sublist_lens[i]; j++) {
+      if (list[i][j] != key) {
+        continue;
+      }
+      active[i] = pressed;
+      break;
+    }
+  }
+  if (list_len == 0) {
+    /* Empty combo set: production behaviour was 'hit_exit
+     * remains true and we exit(0)'. Mirror it here so the
+     * regression test catches any inversion of that signal. */
+    return true;
+  }
+  for (size_t i = 0; i < list_len; i++) {
+    if (!active[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 #endif /* KLOAK_INCLUDE_ESC_KEY_PARSER */
 
 #endif /* KLOAK_PARSERS_INC_H */

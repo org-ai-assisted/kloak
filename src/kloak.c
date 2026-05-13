@@ -1777,9 +1777,6 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
   uint32_t key = 0;
   enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
   enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
-  size_t i = 0;
-  size_t j = 0;
-  bool hit_exit = true;
 
   if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
     return;
@@ -1789,29 +1786,9 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
   key = libinput_event_keyboard_get_key(kb_event);
   key_state = libinput_event_keyboard_get_key_state(kb_event);
 
-  for (i = 0; i < esc_key_list_len; i++) {
-    for (j = 0; j < esc_key_sublist_len[i]; j++) {
-      if (esc_key_list[i][j] != key) {
-        continue;
-      }
-
-      if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
-        active_esc_key_list[i] = true;
-      } else {
-        active_esc_key_list[i] = false;
-      }
-      break;
-    }
-  }
-
-  for (i = 0; i < esc_key_list_len; i++) {
-    if (!active_esc_key_list[i]) {
-      hit_exit = false;
-      break;
-    }
-  }
-
-  if (hit_exit) {
+  if (esc_combo_update(key, key_state == LIBINPUT_KEY_STATE_PRESSED,
+        esc_key_list, esc_key_sublist_len, esc_key_list_len,
+        active_esc_key_list)) {
     exit(0);
   }
 }
