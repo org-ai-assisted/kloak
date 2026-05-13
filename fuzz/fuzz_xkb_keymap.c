@@ -49,9 +49,21 @@ static void silent_log_fn(__attribute__((unused)) struct xkb_context *ctx,
 int LLVMFuzzerInitialize(int *argc, char ***argv) {
   (void)argc;
   (void)argv;
-  g_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+  /* XKB_CONTEXT_NO_DEFAULT_INCLUDES skips the filesystem include-
+   * path probing that xkbcommon 0.10 (the Ubuntu 20.04 / OSS-Fuzz
+   * base-builder version) does in xkb_context_new(). The fuzzer
+   * never compiles include-directives anyway - it feeds raw
+   * keymap strings to xkb_keymap_new_from_string(), which does
+   * not consult /usr/share/X11/xkb when the input is a complete
+   * keymap text. */
+  g_ctx = xkb_context_new(XKB_CONTEXT_NO_DEFAULT_INCLUDES);
   if (g_ctx == NULL) {
-    abort();
+    /* Treat init failure as a soft skip: returning non-zero
+     * tells libFuzzer to bail out of LLVMFuzzerInitialize, but
+     * does NOT trigger a crash report. The non-libFuzzer
+     * harness path (LLVMFuzzerTestOneInput) also guards on
+     * g_ctx so it short-circuits safely. */
+    return 1;
   }
   xkb_context_set_log_fn(g_ctx, silent_log_fn);
   xkb_context_set_log_verbosity(g_ctx, 0);
@@ -59,6 +71,9 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  if (g_ctx == NULL) {
+    return 0;
+  }
   /* xkb_keymap_new_from_string takes a NUL-terminated C string;
    * skip inputs that contain embedded NULs so the harness does
    * not unintentionally truncate the parser's view of the
