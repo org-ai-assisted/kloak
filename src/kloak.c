@@ -1252,10 +1252,6 @@ static void wl_output_handle_scale(__attribute__((unused)) void *data,
   ;
 }
 
-#ifdef WL_OUTPUT_NAME_SINCE_VERSION
-/* wl_output v4 (wayland 1.20+) callbacks. Older wayland-client
- * headers lack these protocol events; output_listener in
- * kloak.h skips the corresponding fields under the same gate. */
 static void wl_output_handle_name(__attribute__((unused)) void *data,
   __attribute__((unused)) struct wl_output *output,
   __attribute__((unused)) const char *name) {
@@ -1267,7 +1263,6 @@ static void wl_output_handle_description(__attribute__((unused)) void *data,
   __attribute__((unused)) const char *description) {
   ;
 }
-#endif
 
 static void xdg_output_handle_logical_position(void *data,
   struct zxdg_output_v1 *xdg_output, int32_t x, int32_t y) {
@@ -2030,15 +2025,6 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
    * horizontal scroll events, so we actually have two scroll accumulators,
    * one for each dimension.
    */
-#ifndef KLOAK_FUZZING
-  /* libinput 1.19+ high-resolution scroll API. The OSS-Fuzz
-   * base-builder image ships Ubuntu 20.04's libinput 1.15, which
-   * lacks both LIBINPUT_EVENT_POINTER_SCROLL_{WHEEL,FINGER,
-   * CONTINUOUS} and libinput_event_pointer_get_scroll_value_v120.
-   * Fuzz harnesses never reach handle_libinput_event (their
-   * targets are pure parsers), so omitting these branches under
-   * KLOAK_FUZZING preserves harness portability without changing
-   * production behaviour. */
   } else if (li_event_type == LIBINPUT_EVENT_POINTER_SCROLL_WHEEL) {
     pointer_event = libinput_event_get_pointer_event(li_event);
     if (libinput_event_pointer_has_axis(pointer_event,
@@ -2088,7 +2074,6 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     if (!ev_packet) {
       return;
     }
-#endif /* KLOAK_FUZZING */
 
   } else if ((li_event_type == LIBINPUT_EVENT_DEVICE_ADDED)
     || (li_event_type == LIBINPUT_EVENT_POINTER_BUTTON)
@@ -2633,7 +2618,6 @@ static void parse_cli_args(int argc, char **argv) {
 /**********/
 /**********/
 
-#ifndef KLOAK_FUZZING
 int main(int argc, char **argv) {
   ssize_t i = 0;
   const char *env_val = NULL;
@@ -2796,4 +2780,3 @@ int main(int argc, char **argv) {
   }
   return 0;
 }
-#endif /* KLOAK_FUZZING */
