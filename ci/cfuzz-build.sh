@@ -91,6 +91,22 @@ for harness in fuzz/fuzz_*.c; do
     ${extra_libs}
 
   printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
+
+  ## OSS-Fuzz / ClusterFuzzLite convention: a seed corpus for
+  ## fuzzer 'X' is packaged as $OUT/X_seed_corpus.zip. CFLite
+  ## auto-extracts it before the run and uses it to bootstrap
+  ## libFuzzer's coverage exploration. Files we check into
+  ## fuzz/corpus/<name>/ are pre-built inputs that exercise
+  ## specific branches the random byte stream would take a long
+  ## time to discover on its own (e.g. valid KEY_* names, a
+  ## minimal-but-parseable xkb keymap, geometry-edge cases).
+  if [ -d "fuzz/corpus/${name}" ] \
+    && [ -n "$(ls -A "fuzz/corpus/${name}" 2>/dev/null)" ]; then
+    # shellcheck disable=SC2164
+    (cd "fuzz/corpus/${name}" && zip -q -r "${OUT}/${name}_seed_corpus.zip" .)
+    printf 'packaged seed corpus -> %s_seed_corpus.zip (%d files)\n' \
+      "${name}" "$(ls -1 "fuzz/corpus/${name}" | wc -l)"
+  fi
 done
 
 ## Bundle non-system shared libs alongside each harness so the

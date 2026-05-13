@@ -1,0 +1,15 @@
+xkb_keymap {
+xkb_keycodes "ml" {
+    <ESC> = 8;
+};
+xkb_types "minimal" {
+    r;
+   };
+xkb_compatibility "mincimal" {
+   #vir;
+};
+xkb_symbols "minimal" {
+    name[group2]="Any";
+    key <ESC> {	[	Escape		]	};
+};
+};

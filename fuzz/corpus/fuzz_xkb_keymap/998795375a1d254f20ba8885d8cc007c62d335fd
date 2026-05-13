@@ -1,0 +1,21 @@
+xkb_keymap {
+xkb_keycodes "minimal" {
+    minimum = 8;
+    maximum = 8;
+    <ESC> = 9;
+};
+xkb_types "minimal" {
+    virtual_modifiers NumLock=Mod2,Alt=Mod1,LevelThree,LAlt=Mod1,RAlt=Mod1,RControl=Control,LControl=Control,ScrollLock,LevelFive,AltGr=Mod5,Meta,Super,Hyper;
+    type "ONE_LEVEL" {
+        modifiers= none;
+      # level_name[Level1]= "Any";
+    };
+};
+xkb_compatibility "minimal" {
+    virtual_modifiers NumLock=Mod2,Alt=Mod1,LevelThree,LAlt=Mod1,RAlt=Mod1,RControl=Control,LCorol,ScrollLock,LevelFive,AltGr=Mod0,Meta,Super,Hyper;
+};
+xkb_symbols "minimal" {
+    name[group1]="Any";
+    key <ESC> {	[	Escape		]	};
+};
+};

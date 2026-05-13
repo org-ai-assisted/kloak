@@ -1,0 +1,17 @@
+xkb_keymap {
+xkb_keycodes "minial" {
+     <ESC> = 0;
+};
+xkb_types "minimal" {ypei;
+    type "ONE_LEVEL" {
+        modifiers= none;
+      #
+    };
+};
+xkb_compatibility "minial" {
+  virtual_modifiers Nck=e,LAlt=ontrol=ControlC,oLntrol=C,Hyper;
+};
+xkb_symbols "minimal" {
+    e[group2]="Any";
+};
+};

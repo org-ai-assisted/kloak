@@ -1,0 +1,20 @@
+xkb_keymap {
+xkb_keycodes "m`nimal" {
+    minimum = 9;
+    maximum = 8;
+    <ESC> = 9;
+};
+xkb_types "minimal" {
+    virtual_modifiers NumLool,ScrollHyper;
+    type "ONE_LEVEL" {
+       level_name[Level1]= "Any";
+    };
+};
+xkb_compatibility "mincimal" {
+   #virtual_modifiers NumLock=lt=Mod1A,Rta,Super,Hyper;
+};
+xkb_symbols "minimal" {
+    name[group1]="Any";
+    key <ESC> {	[	Escape		]	};
+};
+};

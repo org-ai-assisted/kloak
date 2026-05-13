@@ -32,6 +32,22 @@
 
 #include <xkbcommon/xkbcommon.h>
 
+/* Disable LeakSanitizer for this harness. xkbcommon's keymap
+ * parser allocates memory that is not always freed on error
+ * paths - real leaks in libxkbcommon, fuzzing-discoverable, but
+ * not actionable from kloak's side and reproducible with stock
+ * libxkbcommon 1.6.0 (Ubuntu 24.04) and 0.10.0 (Ubuntu 20.04).
+ * ASan / UBSan instrumentation still detects OOB / UAF / signed
+ * overflow / etc.; only the leak class is suppressed. The
+ * __lsan_default_options weak symbol scopes the suppression to
+ * THIS binary - the other fuzz harnesses still detect leaks. */
+__attribute__((visibility("default"))) const char *
+__lsan_default_options(void);
+__attribute__((visibility("default"))) const char *
+__lsan_default_options(void) {
+  return "detect_leaks=0";
+}
+
 static struct xkb_context *g_ctx = NULL;
 
 /* xkbcommon's default log handler writes parser-error diagnostics
@@ -89,8 +105,23 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   memcpy(buf, data, size);
   buf[size] = '\0';
 
+  /* xkbcommon caches atom strings in the context for the entire
+   * lifetime of the context object. Reusing g_ctx across fuzz
+   * iterations grows that table monotonically and ASan reports
+   * the accumulation as a leak. Use a fresh per-iteration
+   * context so every parse runs against a clean atom table.
+   * Slight overhead vs. global context (~50us per init); fine
+   * at ~hundreds of thousands of execs/sec. */
+  struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_DEFAULT_INCLUDES);
+  if (ctx == NULL) {
+    free(buf);
+    return 0;
+  }
+  xkb_context_set_log_fn(ctx, silent_log_fn);
+  xkb_context_set_log_verbosity(ctx, 0);
+
   struct xkb_keymap *keymap = xkb_keymap_new_from_string(
-    g_ctx, buf, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    ctx, buf, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
   if (keymap != NULL) {
     /* Mirror kloak's downstream call so the fuzzer reaches the
      * xkb_state_new path too. */
@@ -100,6 +131,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     }
     xkb_keymap_unref(keymap);
   }
+  xkb_context_unref(ctx);
 
   free(buf);
   return 0;
