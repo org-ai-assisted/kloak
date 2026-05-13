@@ -77,6 +77,7 @@
 #include "kloak_inotify.inc.h"
 #include "kloak_pixbuf.inc.h"
 #include "kloak_traverse.inc.h"
+#include "kloak_walk_cursor.inc.h"
 #include "kloak_layer_dims.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
@@ -1218,11 +1219,7 @@ static struct input_packet * update_virtual_cursor(void) {
   int32_t i = 0;
   struct coord start = { 0 };
   struct coord end = { 0 };
-  struct coord prev_trav_coord = { 0 };
-  bool end_x_hit = false;
-  bool end_y_hit = false;
-  struct coord trav_coord = { 0 };
-  struct screen_local_coord trav_scr_coord = { 0 };
+  struct kloak_walk_cursor_result walk_result = { 0 };
   struct screen_local_coord scr_coord = { 0 };
   struct input_packet *old_ev_packet = NULL;
   struct input_packet *ev_packet = NULL;
@@ -1290,84 +1287,20 @@ static struct input_packet * update_virtual_cursor(void) {
   start.y = (int32_t)(prev_cursor_y);
   end.x = (int32_t)(cursor_x);
   end.y = (int32_t)(cursor_y);
-  prev_trav_coord = start;
-  for (i = 0; ; i++) {
-    trav_coord = traverse_line(start, end, i);
-    if (trav_coord.x == end.x) end_x_hit = true;
-    if (trav_coord.y == end.y) end_y_hit = true;
-    trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-      trav_coord.y);
-    if (!trav_scr_coord.valid) {
-      /*
-       * Figure out what direction we moved when we went off screen, and move
-       * move backwards in that direction, but in only one dimension.
-       */
-      if (prev_trav_coord.x < trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x - 1,
-          trav_coord.y);
-        if (trav_scr_coord.valid) {
-          start.x = trav_coord.x - 1;
-          start.y = trav_coord.y;
-          end.x = trav_coord.x - 1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.x > trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x + 1,
-          trav_coord.y);
-        if (trav_scr_coord.valid) {
-          start.x = trav_coord.x + 1;
-          start.y = trav_coord.y;
-          end.x = trav_coord.x + 1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.y < trav_coord.y) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y - 1);
-        if (trav_scr_coord.valid) {
-          start.y = trav_coord.y - 1;
-          start.x = trav_coord.x;
-          end.y = trav_coord.y -1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.y > trav_coord.y) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y + 1);
-        if (trav_scr_coord.valid) {
-          start.y = trav_coord.y + 1;
-          start.x = trav_coord.x;
-          end.y = trav_coord.y + 1;
-          i = -1;
-          continue;
-        }
-      }
-      /*
-       * If all of the above fail, we've gone diagonally off a screen and into
-       * compositor global space. Move the cursor back to where it was and
-       * stop it.
-       */
-      start.x = prev_trav_coord.x;
-      start.y = prev_trav_coord.y;
-      end.x = prev_trav_coord.x;
-      end.y = prev_trav_coord.y;
-      i = -1;
-      continue;
-    }
-    if (end_x_hit && end_y_hit) {
-      if ((int32_t)(cursor_x) != end.x) {
-        cursor_x = end.x;
-      }
-      if ((int32_t)(cursor_y) != end.y) {
-        cursor_y = end.y;
-      }
-      break;
-    }
-    prev_trav_coord = trav_coord;
+  /* The glide-along-wall loop body lives in kloak_walk_cursor.
+   * inc.h; the pure helper takes the geometries by parameter
+   * and returns the final cursor position so the fuzz harness
+   * can exercise it without the disp_state global. Production
+   * passes INT32_MAX for max_iterations because the walk is
+   * bounded by manhattan distance between start and end
+   * (already int32). */
+  walk_result = walk_cursor_pure(start, end, state.output_geometries,
+    MAX_SCREEN_COUNT, INT32_MAX);
+  if ((int32_t)(cursor_x) != walk_result.final_pos.x) {
+    cursor_x = walk_result.final_pos.x;
+  }
+  if ((int32_t)(cursor_y) != walk_result.final_pos.y) {
+    cursor_y = walk_result.final_pos.y;
   }
   assert(cursor_x < INT32_MAX && cursor_x >= 0);
   assert(cursor_y < INT32_MAX && cursor_y >= 0);
