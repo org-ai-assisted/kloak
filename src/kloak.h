@@ -101,12 +101,18 @@ struct drawable_layer {
 /*
  * Defines the location and size of a display in compositor-global space.
  */
-struct output_geometry {
-  int32_t x;
-  int32_t y;
-  int32_t width;
-  int32_t height;
-};
+/* The full definition of struct output_geometry, plus the helpers
+ * check_point_in_area / check_screen_touch, live in
+ * src/kloak_geometry.inc.h. kloak.c #include's that header after
+ * this kloak.h is processed. The fuzz/fuzz_geometry.c harness
+ * #include's only the .inc.h, which keeps the harness free of
+ * libinput / wayland linkage.
+ *
+ * Forward declaration here is sufficient because every reference
+ * inside kloak.h itself is by pointer (output_geometries[] and
+ * pending_output_geometries[] in disp_state).
+ */
+struct output_geometry;
 
 /*
  * Defines a point in screen-local space, along with which screen the point is
@@ -310,18 +316,9 @@ static int64_t current_time_ms(void);
  */
 static int64_t random_between(int64_t lower, int64_t upper);
 
-/*
- * Determine if a point falls inside an area.
- */
-static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
-  int32_t rect_y, int32_t rect_width, int32_t rect_height);
-
-/*
- * Determine if two screens are touching or overlapping given their
- * geometries.
- */
-static bool check_screen_touch(struct output_geometry scr1,
-  struct output_geometry scr2);
+/* check_point_in_area and check_screen_touch are defined in
+ * src/kloak_geometry.inc.h (single source of truth shared with
+ * the fuzz harness). */
 
 /*
  * Calculates the size of the global compositor space and the location of the
