@@ -74,6 +74,7 @@
 #include "kloak_geometry.inc.h"
 #include "kloak_inotify.inc.h"
 #include "kloak_pixbuf.inc.h"
+#include "kloak_traverse.inc.h"
 #define KLOAK_INCLUDE_ESC_KEY_PARSER
 #include "kloak_parsers.inc.h"
 
@@ -575,59 +576,7 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
   return out_val;
 }
 
-struct coord traverse_line(struct coord start, struct coord end,
-  int32_t pos) {
-  struct coord out_val = { 0 };
-  double num = 0.0;
-  double denom = 0.0;
-  double slope = 0.0;
-  double steep = 0.0;
-
-  num = ((double) end.y) - ((double) start.y);
-  denom = ((double) start.x) - ((double) end.x);
-
-  if (pos == 0) return start;
-
-  if ((int64_t)(denom) == 0) {
-    /* vertical line */
-    out_val.x = start.x;
-    if (start.y < end.y) {
-      out_val.y = start.y + pos;
-    } else {
-      out_val.y = start.y - pos;
-    }
-    return out_val;
-  }
-
-  slope = num / denom;
-  steep = fabs(slope);
-
-  if (steep < 1) {
-    if (start.x < end.x) {
-      out_val.x = start.x + pos;
-    } else {
-      out_val.x = start.x - pos;
-    }
-    if (start.y < end.y) {
-      out_val.y = start.y + (int32_t)((double) pos * steep);
-    } else {
-      out_val.y = start.y - (int32_t)((double) pos * steep);
-    }
-  } else {
-    if (start.y < end.y) {
-      out_val.y = start.y + pos;
-    } else {
-      out_val.y = start.y - pos;
-    }
-    if (start.x < end.x) {
-      out_val.x = start.x + (int32_t)((double) pos * (1 / steep));
-    } else {
-      out_val.x = start.x - (int32_t)((double) pos * (1 / steep));
-    }
-  }
-
-  return out_val;
-}
+/* traverse_line() moved to src/kloak_traverse.inc.h. */
 
 
 static int32_t sleep_ms(int64_t ms) {

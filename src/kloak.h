@@ -348,8 +348,8 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
  * you *can* walk past the end point, and that the end point is NOT guaranteed
  * to be one of the values this function outputs.
  */
-static struct coord traverse_line(struct coord start, struct coord end,
-  int32_t pos);
+/* traverse_line moved to src/kloak_traverse.inc.h alongside the
+ * other extracted helpers. Signature unchanged. */
 
 /*
  * Draws a virtual cursor block on the specified pixel buffer. If crosshair is
