@@ -16,11 +16,23 @@
 ##   https://github.com/google/oss-fuzz/tree/master/infra/base-images/base-builder
 ##   https://google.github.io/oss-fuzz/getting-started/new-project-guide/
 ##
-## Digest sha256:6dd7113e... resolved from the 'latest' tag via the
-## registry manifest API docker-content-digest header (verification
-## step, not trust source):
+## Digest resolved from the 'latest' tag via the registry manifest
+## API docker-content-digest header (verification step, not trust
+## source):
 ##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/latest
-FROM gcr.io/oss-fuzz-base/base-builder@sha256:6dd7113e000cf047f96c612ae9d960629578c319e7c78a9f67833bc95b80f0c3
+##
+## NB: the digest must be re-resolved when kloak's source uses
+## a wayland-client / libinput API that has not yet landed in the
+## previously-pinned image's Ubuntu base. The bootstrap pin
+## (sha256:6dd7113e..., Ubuntu 20.04, libinput 1.15.5,
+## wayland-client 1.18) was too old for kloak's use of
+## wl_output_listener.name / .description (wayland-client 1.20+)
+## and LIBINPUT_EVENT_POINTER_SCROLL_WHEEL / _FINGER / _CONTINUOUS
+## (libinput 1.19+); upstream OSS-Fuzz has since moved
+## base-builder to Ubuntu 24.04 (libinput 1.25, wayland-client
+## 1.22). Re-resolve via the URL above if the build breaks on a
+## newer kloak source API.
+FROM gcr.io/oss-fuzz-base/base-builder@sha256:58d7be505745c0aecafe174b5d3a967ca0660cc892452dc6d90944cd32985d5d
 
 ## Install kloak's build deps. The base image is Ubuntu-based, so
 ## apt works. wayland-protocols + libwayland-bin are needed for the
