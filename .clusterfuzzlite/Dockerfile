@@ -16,23 +16,21 @@
 ##   https://github.com/google/oss-fuzz/tree/master/infra/base-images/base-builder
 ##   https://google.github.io/oss-fuzz/getting-started/new-project-guide/
 ##
-## Digest resolved from the 'latest' tag via the registry manifest
-## API docker-content-digest header (verification step, not trust
-## source):
-##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/latest
+## Digest resolved from the 'ubuntu-24-04' tag via the registry
+## manifest API docker-content-digest header (verification step,
+## not trust source):
+##   https://gcr.io/v2/oss-fuzz-base/base-builder/manifests/ubuntu-24-04
 ##
-## NB: the digest must be re-resolved when kloak's source uses
-## a wayland-client / libinput API that has not yet landed in the
-## previously-pinned image's Ubuntu base. The bootstrap pin
-## (sha256:6dd7113e..., Ubuntu 20.04, libinput 1.15.5,
-## wayland-client 1.18) was too old for kloak's use of
-## wl_output_listener.name / .description (wayland-client 1.20+)
-## and LIBINPUT_EVENT_POINTER_SCROLL_WHEEL / _FINGER / _CONTINUOUS
-## (libinput 1.19+); upstream OSS-Fuzz has since moved
-## base-builder to Ubuntu 24.04 (libinput 1.25, wayland-client
-## 1.22). Re-resolve via the URL above if the build breaks on a
-## newer kloak source API.
-FROM gcr.io/oss-fuzz-base/base-builder@sha256:58d7be505745c0aecafe174b5d3a967ca0660cc892452dc6d90944cd32985d5d
+## kloak's source uses APIs that require:
+##   - wayland-client >= 1.20 (wl_output_listener.name / .description)
+##   - libinput >= 1.19 (LIBINPUT_EVENT_POINTER_SCROLL_WHEEL /
+##     _FINGER / _CONTINUOUS, libinput_event_pointer_get_scroll_value{,_v120})
+## The default :latest base-builder tag is still Ubuntu 20.04 with
+## libinput 1.15.5 / wayland-client 1.18, which is too old. OSS-Fuzz
+## publishes an :ubuntu-24-04 variant (libinput 1.25,
+## wayland-client 1.22) - use that. Re-resolve the digest via the
+## URL above when bumping.
+FROM gcr.io/oss-fuzz-base/base-builder@sha256:f3807db09c7e544ab8376e6a551a1c541cc752b4022bf38c94b16f2cc2f80f00
 
 ## Install kloak's build deps. The base image is Ubuntu-based, so
 ## apt works. wayland-protocols + libwayland-bin are needed for the
