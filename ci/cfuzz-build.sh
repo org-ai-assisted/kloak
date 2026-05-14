@@ -44,4 +44,41 @@ export LIB_FUZZING_ENGINE="${LIB_FUZZING_ENGINE:--fsanitize=fuzzer}"
 export LDFLAGS="${LDFLAGS:-}"
 
 mkdir --parents -- "${OUT}"
-exec "${MAKE:-make}" --directory="${REPO_ROOT}" fuzz
+"${MAKE:-make}" --directory="${REPO_ROOT}" fuzz
+
+## --- Runtime shared library copy ------------------------------------
+##
+## After the build, OSS-Fuzz copies $OUT into a stripped deploy
+## container for bad_build_check and fuzzing. That deploy env has
+## no -dev libraries, so any .so we link against dynamically must
+## travel with the binary. The Makefile fuzz rule sets
+## RPATH=$ORIGIN; this step populates $ORIGIN (i.e. $OUT) with
+## every non-system .so each fuzz binary depends on.
+##
+## ldd output is parsed in the binary's own deploy-container; we
+## run it here against the build-container libraries, which is the
+## same root tree because of how OSS-Fuzz layers its images on
+## base-builder. System libs (libc, libm, ld-linux, libgcc, ...)
+## are filtered out - they exist in every deploy env.
+
+shopt -s nullglob
+for fuzzer in "${OUT}"/fuzz_*; do
+  [ -x "${fuzzer}" ] || continue
+  case "${fuzzer}" in
+    *.zip|*.dict|*_seed_corpus*) continue ;;
+  esac
+  ldd -- "${fuzzer}" 2>/dev/null \
+    | awk '/=> \//{print $3}' \
+    | while IFS= read -r lib; do
+        base=$(basename -- "${lib}")
+        case "${base}" in
+          libc.so.*|libc-*.so|ld-linux-*.so*|libm.so.*|librt.so.*|libpthread.so.*|libdl.so.*|libresolv.so.*|libnsl.so.*) ;;
+          linux-vdso.so.*|linux-gate.so.*) ;;
+          libgcc_s.so.*|libstdc++.so.*) ;;
+          *)
+            dest="${OUT}/${base}"
+            [ -e "${dest}" ] || cp --dereference -- "${lib}" "${dest}"
+            ;;
+        esac
+      done
+done

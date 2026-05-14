@@ -155,4 +155,4 @@ fuzz : $(FUZZ_BINS)
 
 $(OUT)/fuzz_% : fuzz/fuzz_%.c src/kloak.c src/kloak.h $(FUZZ_PROTO_SRCS) $(FUZZ_PROTO_HEADERS)
 	@mkdir -p -- $(@D)
-	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) $(CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)
+	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -Wl,-rpath,'$$ORIGIN' $(CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)
