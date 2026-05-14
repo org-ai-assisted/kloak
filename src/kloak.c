@@ -2548,7 +2548,17 @@ static void parse_esc_key_str(const char *esc_key_str) {
   size_t i = 0;
   size_t j = 0;
 
-  for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
+  /*
+   * Start indexing at the *current* esc_key_list_len, not at 0:
+   * parse_esc_key_str is invoked once per --esc-key-combo argument
+   * and is expected to append to the three parallel arrays. The
+   * earlier `i = 0` initialiser overwrote esc_key_list[0] on the
+   * second call (leaking the first call's allocation) and left
+   * the freshly-reallocated tail slot uninitialised, so any later
+   * read of esc_key_list[old_len] was undefined behaviour.
+   * Surfaced by the parse_cli_args fuzz harness.
+   */
+  for (i = esc_key_list_len; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
     if (root_token[0] == '\0' ) {
 #ifndef KLOAK_FUZZING
       fprintf(stderr,
@@ -2861,28 +2871,44 @@ static void parse_cli_args(int argc, char **argv) {
     if (getopt_rslt == -1) {
       break;
     } else if (getopt_rslt == '?') {
+#ifndef KLOAK_FUZZING
       print_usage();
       exit(1);
+#else
+      goto fuzz_cleanup;
+#endif
     } else if (getopt_rslt == 'd') {
       if (!parse_uint31_arg(optarg, 10, &max_delay)) {
+#ifndef KLOAK_FUZZING
         fprintf(stderr,
           "FATAL ERROR: Invalid value '%s' passed to parameter 'delay'!",
           optarg);
         exit(1);
+#else
+        goto fuzz_cleanup;
+#endif
       }
     } else if (getopt_rslt == 's') {
       if (!parse_uint31_arg(optarg, 10, &startup_delay)) {
+#ifndef KLOAK_FUZZING
         fprintf(stderr,
           "FATAL ERROR: Invalid value '%s' passed to parameter 'start-delay'!",
           optarg);
         exit(1);
+#else
+        goto fuzz_cleanup;
+#endif
       }
     } else if (getopt_rslt == 'c') {
       if (!parse_uint32_arg(optarg, 16, &cursor_color)) {
+#ifndef KLOAK_FUZZING
         fprintf(stderr,
           "FATAL ERROR: Invalid value '%s' passed to parameter 'color'!",
           optarg);
         exit(1);
+#else
+        goto fuzz_cleanup;
+#endif
       }
       if ((cursor_color >> 24) == 0) {
         /*
@@ -2900,17 +2926,30 @@ static void parse_cli_args(int argc, char **argv) {
     } else if (getopt_rslt == 'k') {
       parse_esc_key_str(optarg);
     } else if (getopt_rslt == 'h') {
+#ifndef KLOAK_FUZZING
       print_usage();
       exit(0);
+#else
+      goto fuzz_cleanup;
+#endif
     } else {
+#ifndef KLOAK_FUZZING
       print_usage();
       exit(1);
+#else
+      goto fuzz_cleanup;
+#endif
     }
   }
 
   if (esc_key_list == NULL) {
     parse_esc_key_str(default_esc_key_str);
   }
+
+#ifdef KLOAK_FUZZING
+fuzz_cleanup:
+  (void)0;
+#endif
 }
 
 /**********/
