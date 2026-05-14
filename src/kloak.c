@@ -408,9 +408,19 @@ static void read_random(char *buf, ssize_t len) {
   assert(buf != NULL);
 
   if (read(randfd, buf, (size_t)(len)) < len) {
+#ifndef KLOAK_FUZZING
     fprintf(stderr,
       "FATAL ERROR: Could not read %ld byte(s) from /dev/urandom!\n", len);
     exit(1);
+#else
+    /*
+     * Under libFuzzer, exit(1) silently halts the worker. abort()
+     * lets the fuzzer treat a short read as a finding. In practice
+     * this is reachable only if a harness mis-initialises randfd,
+     * which is a harness bug worth surfacing immediately.
+     */
+    abort();
+#endif
   }
 }
 
@@ -733,9 +743,21 @@ static void recalc_global_space(struct disp_state *param_state) {
   }
 
   if (conn_screen_list_len != screen_list_len) {
+#ifndef KLOAK_FUZZING
     fprintf(stderr,
       "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
     exit(1);
+#else
+    /*
+     * Random fuzz inputs will hit the gap path on the overwhelming
+     * majority of layouts. Returning quietly under KLOAK_FUZZING
+     * lets the fuzzer keep exploring the bounding-box arithmetic
+     * (which is the actual point of fuzzing this function) instead
+     * of halting on the trivial gap case. The production path is
+     * unchanged.
+     */
+    return;
+#endif
   }
 
   param_state->global_space_width = br_corner_x;
