@@ -48,6 +48,75 @@ if [ -z "${LIB_FUZZING_ENGINE:-}" ]; then
   LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
 fi
 
+## --- Kloak hardening flags (mirror Makefile) ------------------------
+##
+## Mirror the compiler hardening that the production Makefile applies
+## to kloak so the fuzz binaries exercise the same -ftrapv signed
+## arithmetic, FORTIFY_SOURCE, stack protector, and warning surface
+## as the binary that ships. Appended to ${CFLAGS} so OSS-Fuzz's
+## sanitizer flags (set in the base-builder container) and the
+## hardening flags compose; in local-dev mode ${CFLAGS} starts from
+## our libFuzzer baseline above.
+##
+## WARN_CFLAGS / FORTIFY_CFLAGS / BIN_CFLAGS / LDFLAGS structure
+## intentionally tracks Makefile lines 23-75 so a diff stays small.
+
+CC_VERSION_OUT="$("${CC}" --version 2>/dev/null || true)"
+TARGETARCH="$("${CC}" -dumpmachine 2>/dev/null || true)"
+
+KLOAK_WARN_CFLAGS="-Wall -Wextra -Wformat -Wformat=2 -Wconversion \
+-Wimplicit-fallthrough -Werror=format-security -Werror=implicit \
+-Werror=int-conversion -Werror=incompatible-pointer-types \
+-Wformat-overflow -Wformat-signedness -Wformat-truncation \
+-Wnull-dereference -Winit-self -Wmissing-include-dirs \
+-Wshift-negative-value -Wshift-overflow -Wswitch-default \
+-Wuninitialized -Walloca -Warray-bounds -Wfloat-equal -Wshadow \
+-Wpointer-arith -Wundef -Wunused-macros -Wbad-function-cast -Wcast-qual \
+-Wcast-align -Wwrite-strings -Wdate-time -Wstrict-prototypes \
+-Wold-style-definition -Wredundant-decls -Winvalid-utf8 -Wvla \
+-Wdisabled-optimization -Wstack-protector -Wdeclaration-after-statement"
+
+case "${CC_VERSION_OUT}" in
+  *clang*)
+    ## clang as of 19.1.0 does not support the gcc-only warnings
+    ## below; gate them out of the clang build the same way the
+    ## Makefile does.
+    : ;;
+  *)
+    KLOAK_WARN_CFLAGS="${KLOAK_WARN_CFLAGS} \
+-Wtrampolines -Wbidi-chars=any,ucn -Wformat-overflow=2 \
+-Wformat-truncation=2 -Wshift-overflow=2 -Wtrivial-auto-var-init \
+-Wstringop-overflow=3 -Wstrict-flex-arrays -Walloc-zero \
+-Warray-bounds=2 -Wattribute-alias=2 \
+-Wduplicated-branches -Wduplicated-cond -Wcast-align=strict \
+-Wjump-misses-init -Wlogical-op" ;;
+esac
+
+## IMPORTANT: keep -ftrapv after -fno-strict-overflow; the latter
+## implies -fwrapv, which -ftrapv must override. (Same caveat as
+## the Makefile.)
+KLOAK_FORTIFY_CFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+-fstack-clash-protection -fstack-protector-all \
+-fno-delete-null-pointer-checks -fno-strict-overflow -fno-strict-aliasing \
+-fstrict-flex-arrays=3 -ftrapv -ftrivial-auto-var-init=pattern"
+
+case "${TARGETARCH}" in
+  x86_64*-linux-gnu)
+    KLOAK_FORTIFY_CFLAGS="${KLOAK_FORTIFY_CFLAGS} \
+-fcf-protection=full -fzero-call-used-regs=all" ;;
+  aarch64*-linux-gnu)
+    KLOAK_FORTIFY_CFLAGS="${KLOAK_FORTIFY_CFLAGS} \
+-mbranch-protection=standard -fzero-call-used-regs=all" ;;
+esac
+
+KLOAK_BIN_CFLAGS="-fPIE"
+
+CFLAGS="${CFLAGS} ${KLOAK_WARN_CFLAGS} ${KLOAK_FORTIFY_CFLAGS} ${KLOAK_BIN_CFLAGS}"
+
+KLOAK_LDFLAGS="-Wl,-z,nodlopen -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now \
+-Wl,-z,separate-code -Wl,--as-needed -Wl,--no-copy-dt-needed-entries -pie"
+LDFLAGS="${LDFLAGS:-} ${KLOAK_LDFLAGS}"
+
 ## --- Wayland protocol codegen ---------------------------------------
 ##
 ## kloak.c #include's the generated protocol headers, so we need
@@ -96,6 +165,7 @@ for harness in fuzz/fuzz_*.c; do
     "${PROTO_SRC[@]}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
+    ${LDFLAGS} \
     -lm -lrt \
     ${PKG_LIBS_VALUE}
 
