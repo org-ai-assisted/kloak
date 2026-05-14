@@ -78,12 +78,12 @@ jobs:
   ##       with:
   ##         persist-credentials: false
   ##     - name: Build fuzzers
-  ##       uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+  ##       uses: google/clusterfuzzlite/actions/build_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
   ##       with:
   ##         language: c
   ##         sanitizer: address
   ##     - name: Run fuzzers (code-change)
-  ##       uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+  ##       uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
   ##       with:
   ##         github-token: ${{ secrets.GITHUB_TOKEN }}
   ##         fuzz-seconds: 60
@@ -105,12 +105,12 @@ jobs:
   ##       with:
   ##         persist-credentials: false
   ##     - name: Build fuzzers
-  ##       uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+  ##       uses: google/clusterfuzzlite/actions/build_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
   ##       with:
   ##         language: c
   ##         sanitizer: undefined
   ##     - name: Run fuzzers (code-change)
-  ##       uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+  ##       uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
   ##       with:
   ##         github-token: ${{ secrets.GITHUB_TOKEN }}
   ##         fuzz-seconds: 60
@@ -135,15 +135,21 @@ jobs:
           persist-credentials: false
 
       - name: Build fuzzers
-        ## https://github.com/google/clusterfuzzlite/tree/v1
-        ## > 884713a6c30a92e5e8544c39945cd7cb630abcd1
-        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        ## https://github.com/google/clusterfuzzlite/tree/migrate-to-ubuntu-24-04
+        ## > d2c7d068aab9081cbbc57825ad0d5d6ca6674f95 (2025-12-02)
+        ## Pinned to the migrate-to-ubuntu-24-04 branch so the
+        ## clusterfuzzlite-{build,run}-fuzzers wrapper images are
+        ## :ubuntu-24-04-v1 (glibc 2.39) rather than :v1 (glibc
+        ## 2.31). The project base-builder is itself
+        ## :ubuntu-24-04; matching the wrapper avoids
+        ## 'GLIBC_2.33 not found' at bad_build_check runtime.
+        uses: google/clusterfuzzlite/actions/build_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
         with:
           language: c
           sanitizer: address
 
       - name: Run fuzzers (batch)
-        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: ${{ github.event.inputs.fuzz_seconds || '600' }}
@@ -166,13 +172,13 @@ jobs:
           persist-credentials: false
 
       - name: Build fuzzers
-        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        uses: google/clusterfuzzlite/actions/build_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
         with:
           language: c
           sanitizer: undefined
 
       - name: Run fuzzers (batch)
-        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fuzz-seconds: ${{ github.event.inputs.fuzz_seconds || '600' }}
