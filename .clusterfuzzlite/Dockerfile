@@ -44,6 +44,7 @@ RUN apt-get update && \
       libxkbcommon-dev \
       libwayland-bin \
       wayland-protocols \
+      patchelf \
       pkg-config && \
     rm -rf /var/lib/apt/lists/*
 

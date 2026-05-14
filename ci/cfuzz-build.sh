@@ -82,3 +82,15 @@ for fuzzer in "${OUT}"/fuzz_*; do
         esac
       done
 done
+
+## Each copied .so also needs RUNPATH=$ORIGIN so its OWN transitive
+## deps resolve to siblings in $OUT. RUNPATH does not propagate
+## through the loader - libinput.so.10's RUNPATH controls how
+## libinput finds libmtdev.so.1, not the binary's RUNPATH. Without
+## this step, OSS-Fuzz's bad_build_check rejects every fuzzer with
+## 'libmtdev.so.1: cannot open shared object file' even though
+## libmtdev is sitting right next to libinput in $OUT.
+for lib in "${OUT}"/lib*.so*; do
+  [ -f "${lib}" ] || continue
+  patchelf --set-rpath '$ORIGIN' "${lib}"
+done
