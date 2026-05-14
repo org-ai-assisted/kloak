@@ -18,114 +18,28 @@
 ##    sanitizer-aware $CC). Picks sensible defaults: clang +
 ##    -fsanitize=fuzzer,address,undefined. Useful for local
 ##    developer iteration without spinning up Docker.
+##
+## Both modes hand off to `make fuzz` so the Makefile is the single
+## source of truth for the kloak compile flags and harness build
+## rule. Variables are exported into make's environment (not passed
+## on the command line) so the Makefile's
+##   CFLAGS := <hardening> $(CFLAGS)
+## composition step runs. A command-line `make CFLAGS=...` would
+## override that step and the fuzz binaries would lose hardening.
 
 set -o errexit
 set -o nounset
 set -o pipefail
 set -o errtrace
 
-## Resolve repo root regardless of caller's cwd.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-cd -- "${REPO_ROOT}"
 
-## --- Mode detection -------------------------------------------------
+export OUT="${OUT:-${REPO_ROOT}/out}"
+export CC="${CC:-clang}"
+export CFLAGS="${CFLAGS:--O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined}"
+export LIB_FUZZING_ENGINE="${LIB_FUZZING_ENGINE:--fsanitize=fuzzer}"
+export LDFLAGS="${LDFLAGS:-}"
 
-## ClusterFuzzLite path: $OUT is set, $CC / $CFLAGS /
-## $LIB_FUZZING_ENGINE pre-baked by base-builder.
-## Local-dev path: nothing pre-set, fall back to clang + libFuzzer.
-if [ -z "${OUT:-}" ]; then
-  OUT="${REPO_ROOT}/out"
-  mkdir -p -- "${OUT}"
-fi
-if [ -z "${CC:-}" ]; then
-  CC="clang"
-fi
-if [ -z "${CFLAGS:-}" ]; then
-  CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-link,address,undefined"
-fi
-if [ -z "${LIB_FUZZING_ENGINE:-}" ]; then
-  LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
-fi
-
-## --- Kloak hardening flags (sourced from the Makefile) --------------
-##
-## The Makefile is the single source of truth for the production
-## hardening flag set (WARN_CFLAGS / FORTIFY_CFLAGS / BIN_CFLAGS /
-## LDFLAGS, with clang-vs-gcc and arch gating). Rather than
-## duplicate that knowledge here, we evaluate the Makefile and ask
-## for its final CFLAGS / LDFLAGS, given the compiler we selected
-## and the sanitizer baseline above.
-##
-## We inject a print-% target inline via `make --eval` so the
-## Makefile itself stays untouched, and we export CC / CFLAGS /
-## LDFLAGS into make's environment (not the command line) so the
-## Makefile's `CFLAGS := <hardening> $(CFLAGS)` composition step
-## actually runs - command-line `make CFLAGS=...` would override
-## that composition and we would end up without any hardening.
-LDFLAGS="${LDFLAGS:-}"
-export CC CFLAGS LDFLAGS
-
-MAKE_BIN="${MAKE:-make}"
-# Single quotes are deliberate: make (not bash) interprets $($*).
-# shellcheck disable=SC2016
-MAKE_PRINT='print-%: ; @echo "$($*)"'
-CFLAGS="$("${MAKE_BIN}" -s -C "${REPO_ROOT}" \
-  --eval="${MAKE_PRINT}" print-CFLAGS)"
-LDFLAGS="$("${MAKE_BIN}" -s -C "${REPO_ROOT}" \
-  --eval="${MAKE_PRINT}" print-LDFLAGS)"
-
-## --- Wayland protocol codegen ---------------------------------------
-##
-## kloak.c #include's the generated protocol headers, so we need
-## wayland-scanner to produce them before compiling any harness.
-## Mirror the Makefile's targets.
-
-PROTO_SRC=()
-for proto_pair in \
-  "xdg-shell.xml:src/xdg-shell-protocol" \
-  "xdg-output-unstable-v1.xml:src/xdg-output-protocol" \
-  "wlr-layer-shell-unstable-v1.xml:src/wlr-layer-shell" \
-  "wlr-virtual-pointer-unstable-v1.xml:src/wlr-virtual-pointer" \
-  "virtual-keyboard-unstable-v1.xml:src/virtual-keyboard" ; do
-  xml="${proto_pair%%:*}"
-  base="${proto_pair##*:}"
-  wayland-scanner client-header < "protocol/${xml}" > "${base}.h"
-  wayland-scanner private-code  < "protocol/${xml}" > "${base}.c"
-  PROTO_SRC+=("${base}.c")
-done
-
-## --- Harness compile loop -------------------------------------------
-##
-## Each harness #include's src/kloak.c with -DKLOAK_FUZZING so
-## main() is excluded; the harness file itself supplies
-## LLVMFuzzerTestOneInput. We compile the protocol .c files into
-## the same binary because kloak.c's body references their
-## interface symbols even when those code paths are dead.
-##
-## pkg-config provides cflags/libs for libinput, libevdev,
-## wayland-client, xkbcommon - the same set kloak's main Makefile
-## consumes.
-
-PKG_LIBS="libinput libevdev wayland-client xkbcommon"
-PKG_CFLAGS_VALUE="$(pkg-config --cflags ${PKG_LIBS})"
-PKG_LIBS_VALUE="$(pkg-config --libs ${PKG_LIBS})"
-
-for harness in fuzz/fuzz_*.c; do
-  name="$(basename -- "${harness}" .c)"
-  printf 'building %s\n' "${name}"
-
-  # shellcheck disable=SC2086
-  ${CC} ${CFLAGS} \
-    -DKLOAK_FUZZING \
-    ${PKG_CFLAGS_VALUE} \
-    "${harness}" \
-    "${PROTO_SRC[@]}" \
-    -o "${OUT}/${name}" \
-    ${LIB_FUZZING_ENGINE} \
-    ${LDFLAGS} \
-    -lm -lrt \
-    ${PKG_LIBS_VALUE}
-
-  printf 'compiled %s -> %s\n' "${name}" "${OUT}/${name}"
-done
+mkdir -p -- "${OUT}"
+exec "${MAKE:-make}" -C "${REPO_ROOT}" fuzz

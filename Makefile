@@ -125,9 +125,34 @@ auto-generated-man-pages/% : man/%.ronn
 clean :
 	rm -f kloak
 	rm -f src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.h src/wlr-layer-shell.c src/wlr-virtual-pointer.h src/wlr-virtual-pointer.c src/virtual-keyboard.h src/virtual-keyboard.c
+	rm -rf $(OUT)
 
 install : all etc/apparmor.d/usr.bin.kloak $(MANPAGES)
 	$(INSTALL) -d -m 755 $(addprefix $(DESTDIR), $(bindir) $(mandir)/man8 $(apparmor_dir))
 	$(INSTALL) -m 755 kloak $(DESTDIR)$(bindir)
 	$(INSTALL) -m 644 $(MANPAGES) $(DESTDIR)$(mandir)/man8
 	$(INSTALL) -m 644 etc/apparmor.d/usr.bin.kloak $(DESTDIR)$(apparmor_dir)
+
+## --- libFuzzer harnesses ---------------------------------------------
+##
+## Each fuzz/fuzz_*.c #include's src/kloak.c with -DKLOAK_FUZZING.
+## Fuzzer binaries inherit the same hardening flag set as kloak
+## (WARN_CFLAGS / FORTIFY_CFLAGS / BIN_CFLAGS / LDFLAGS defined
+## above), plus -DKLOAK_FUZZING and the libFuzzer engine. OUT,
+## CFLAGS, LDFLAGS, and LIB_FUZZING_ENGINE are inherited from the
+## environment so OSS-Fuzz / ClusterFuzzLite and ci/cfuzz-build.sh
+## can supply them; sensible defaults let `make fuzz` work alone.
+
+OUT                 ?= out
+LIB_FUZZING_ENGINE  ?= -fsanitize=fuzzer
+FUZZ_SRCS           := $(wildcard fuzz/fuzz_*.c)
+FUZZ_BINS           := $(patsubst fuzz/%.c,$(OUT)/%,$(FUZZ_SRCS))
+FUZZ_PROTO_SRCS     := src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c
+FUZZ_PROTO_HEADERS  := src/xdg-shell-protocol.h src/xdg-output-protocol.h src/wlr-layer-shell.h src/wlr-virtual-pointer.h src/virtual-keyboard.h
+
+.PHONY : fuzz
+fuzz : $(FUZZ_BINS)
+
+$(OUT)/fuzz_% : fuzz/fuzz_%.c src/kloak.c src/kloak.h $(FUZZ_PROTO_SRCS) $(FUZZ_PROTO_HEADERS)
+	@mkdir -p -- $(@D)
+	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) $(CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)
