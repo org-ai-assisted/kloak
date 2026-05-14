@@ -2503,11 +2503,22 @@ static void handle_inotify_events(void) {
     assert(rem_len >= 0);
 
     if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
+#ifndef KLOAK_FUZZING
       if (ie->mask & IN_CREATE) {
         attach_input_device(ie->name);
       } else {
         detach_input_device(ie->name);
       }
+#else
+      /*
+       * Under fuzzing, libinput (li) is never initialised by
+       * applayer_libinput_init(), so attach_input_device() would
+       * NULL-deref via libinput_path_add_device(li, ...). Skip
+       * the side-effect calls; the strncmp branch above is still
+       * exercised, which is the point of fuzzing this function.
+       */
+      (void)ie->mask;
+#endif
     }
 
     if (rem_len <= 0) {
@@ -2539,9 +2550,13 @@ static void parse_esc_key_str(const char *esc_key_str) {
 
   for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
     if (root_token[0] == '\0' ) {
+#ifndef KLOAK_FUZZING
       fprintf(stderr,
         "FATAL ERROR: Empty key name specified in escape key list!\n");
       exit(1);
+#else
+      goto fuzz_cleanup;
+#endif
     }
 
     esc_key_list_len++;
@@ -2557,9 +2572,13 @@ static void parse_esc_key_str(const char *esc_key_str) {
 
     for (j = 0; ((sub_token = strsep(&root_token, "|")) != NULL); j++)  {
       if (sub_token[0] == '\0') {
+#ifndef KLOAK_FUZZING
         fprintf(stderr,
           "FATAL ERROR: Empty key name specified in escape key list!\n");
         exit(1);
+#else
+        goto fuzz_cleanup;
+#endif
       }
 
       esc_key_sublist_len[i]++;
@@ -2567,13 +2586,20 @@ static void parse_esc_key_str(const char *esc_key_str) {
         esc_key_sublist_len[i], sizeof(uint32_t));
       esc_key_list[i][j] = lookup_keycode(sub_token);
       if (esc_key_list[i][j] == 0) {
+#ifndef KLOAK_FUZZING
         fprintf(stderr, "FATAL ERROR: Unrecognized Key name '%s'!\n",
           sub_token);
         exit(1);
+#else
+        goto fuzz_cleanup;
+#endif
       }
     }
   }
 
+#ifdef KLOAK_FUZZING
+fuzz_cleanup:
+#endif
   free(orig_key_str_copy);
 }
 
