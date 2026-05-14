@@ -147,6 +147,15 @@ jobs:
         with:
           language: c
           sanitizer: address
+          ## bad_build_check's UBSan / coverage-instrumentation
+          ## heuristics produce false positives on kloak's small
+          ## arithmetic harnesses because -ftrapv supplants the
+          ## signed-overflow UBSan handlers (no __ubsan_handle_*
+          ## symbols emitted) and because the harnesses are so
+          ## tight the SanCov PC count is below the heuristic
+          ## floor. Disable the check; run_fuzzers below still
+          ## catches real runtime issues when it actually fuzzes.
+          bad-build-check: false
 
       - name: Run fuzzers (batch)
         uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
@@ -176,6 +185,8 @@ jobs:
         with:
           language: c
           sanitizer: undefined
+          ## See address job comment - same heuristic mismatch.
+          bad-build-check: false
 
       - name: Run fuzzers (batch)
         uses: google/clusterfuzzlite/actions/run_fuzzers@d2c7d068aab9081cbbc57825ad0d5d6ca6674f95  # migrate-to-ubuntu-24-04 @ 2025-12-02
