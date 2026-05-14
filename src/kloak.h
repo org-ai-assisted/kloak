@@ -61,12 +61,14 @@ struct li_device_info {
 };
 
 /*
- * Defines an evdev key code and the corresponding string.
+ * struct key_name_value, key_table[], parse_uint31_arg,
+ * parse_uint32_arg, and lookup_keycode were factored out into
+ * src/kloak_parsers.inc.h. kloak.c #include's that header below
+ * (after this kloak.h is included). The fuzz harnesses include
+ * only kloak_parsers.inc.h, which keeps them free of
+ * libinput/wayland linkage so they run in the OSS-Fuzz run-fuzzers
+ * container.
  */
-struct key_name_value {
-    const char *name;
-    const uint32_t value;
-};
 
 /*
  * Defines a screen-local layer that can be drawn on. Each screen has one
@@ -99,12 +101,18 @@ struct drawable_layer {
 /*
  * Defines the location and size of a display in compositor-global space.
  */
-struct output_geometry {
-  int32_t x;
-  int32_t y;
-  int32_t width;
-  int32_t height;
-};
+/* The full definition of struct output_geometry, plus the helpers
+ * check_point_in_area / check_screen_touch, live in
+ * src/kloak_geometry.inc.h. kloak.c #include's that header after
+ * this kloak.h is processed. The fuzz/fuzz_geometry.c harness
+ * #include's only the .inc.h, which keeps the harness free of
+ * libinput / wayland linkage.
+ *
+ * Forward declaration here is sufficient because every reference
+ * inside kloak.h itself is by pointer (output_geometries[] and
+ * pending_output_geometries[] in disp_state).
+ */
+struct output_geometry;
 
 /*
  * Defines a point in screen-local space, along with which screen the point is
@@ -242,15 +250,13 @@ union rand_int64 {
 static void *safe_calloc(size_t nmemb, size_t size);
 
 /*
- * Reallocates the requested amount of memory and returns a pointer to it.
- * Kills the process if the allocation fails.
+ * safe_reallocarray() and safe_strdup() are forward-declared in
+ * src/kloak_parsers.inc.h instead of here. The .inc.h is also
+ * included by the libFuzzer harnesses, which need the forward
+ * declarations so that parse_esc_key_str (which uses both) can
+ * be compiled in their TUs. Declaring them only once - in the
+ * .inc.h - avoids a -Wredundant-decls warning in kloak.c's TU.
  */
-static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size);
-
-/*
- * Duplicates a string. Kills the process if allocation fails.
- */
-static char *safe_strdup(const char *s);
 
 /*
  * Opens a file. Kills the process if the open fails.
@@ -310,18 +316,9 @@ static int64_t current_time_ms(void);
  */
 static int64_t random_between(int64_t lower, int64_t upper);
 
-/*
- * Determine if a point falls inside an area.
- */
-static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
-  int32_t rect_y, int32_t rect_width, int32_t rect_height);
-
-/*
- * Determine if two screens are touching or overlapping given their
- * geometries.
- */
-static bool check_screen_touch(struct output_geometry scr1,
-  struct output_geometry scr2);
+/* check_point_in_area and check_screen_touch are defined in
+ * src/kloak_geometry.inc.h (single source of truth shared with
+ * the fuzz harness). */
 
 /*
  * Calculates the size of the global compositor space and the location of the
@@ -351,16 +348,18 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
  * you *can* walk past the end point, and that the end point is NOT guaranteed
  * to be one of the values this function outputs.
  */
-static struct coord traverse_line(struct coord start, struct coord end,
-  int32_t pos);
+/* traverse_line moved to src/kloak_traverse.inc.h alongside the
+ * other extracted helpers. Signature unchanged. */
 
 /*
  * Draws a virtual cursor block on the specified pixel buffer. If crosshair is
  * set to true, crosshairs representing the cursor will be drawn in the block,
  * otherwise the block will simply blank out anything that it is drawing over.
  */
-static void draw_block(uint32_t * pixbuf, int32_t offset, int32_t x, int32_t y,
-  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair);
+/* draw_block moved to src/kloak_pixbuf.inc.h alongside the
+ * other extracted helpers. The signature gained an explicit
+ * 'cursor_color' parameter so callers wire that global through;
+ * the fuzz harness passes a fuzz-controlled value. */
 
 /*
  * Parse an option parameter as an integer between 0 and INT32_MAX, and save
@@ -562,7 +561,8 @@ static void handle_inotify_events(void);
 /*
  * Parses an escape key specification into the escape key globals.
  */
-static void parse_esc_key_str(const char *esc_key_str);
+/* parse_esc_key_str moved to kloak_parsers.inc.h alongside the
+ * other CLI parser surface. */
 
 /*
  * Determines how long the core event loop's `poll` should sleep for.

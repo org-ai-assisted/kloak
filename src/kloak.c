@@ -21,32 +21,47 @@
 
 #define _GNU_SOURCE
 
+/*
+ * KLOAK_FUZZ split. Production builds compile every byte of this
+ * file. libFuzzer harnesses under fuzz/ '#include "../src/
+ * kloak.c"' with KLOAK_FUZZ defined so they can call the pure
+ * helpers inlined below without dragging in the wayland /
+ * libinput / xkbcommon / libevdev linkage the production code
+ * needs. The maintainer prefers everything in two source files
+ * (kloak.c + kloak.h); rather than spread the helpers across
+ * separate header files we use this compile-time toggle to
+ * carve out the pure subset of kloak.c that the fuzz binaries
+ * can compile against.
+ */
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <errno.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <poll.h>
 #include <stdbool.h>
 #include <sys/types.h>
-#include <dirent.h>
-#include <time.h>
 #include <math.h>
-#include <sys/queue.h>
 #include <getopt.h>
 #include <assert.h>
 #include <limits.h>
+#include <linux/input.h>
+#include <sys/inotify.h>
+
+#ifndef KLOAK_FUZZ
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <poll.h>
+#include <dirent.h>
+#include <time.h>
+#include <sys/queue.h>
 #include <sys/ioctl.h>
 #include <linux/vt.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <ctype.h>
-#include <linux/input.h>
-#include <sys/inotify.h>
 
 #include <wayland-client.h>
 
@@ -71,49 +86,1403 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include "kloak.h"
+#else
+/*
+ * Under KLOAK_FUZZ kloak.h is not included (it forward-declares
+ * many wayland / libinput / xkbcommon / libevdev types that
+ * bring in their own enum dependencies). Provide just the
+ * struct types the pure helpers below need.
+ */
+struct coord {
+  int32_t x;
+  int32_t y;
+};
+struct screen_local_coord {
+  int32_t x;
+  int32_t y;
+  int32_t output_idx;
+  bool valid;
+};
+#endif
+/* === kloak_geometry.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure-geometry surface for kloak's multi-screen recalculation.
+ * Included by kloak.c (where the helpers are called from
+ * recalc_global_space) and by the libFuzzer harness in
+ * fuzz/fuzz_geometry.c. The functions touch nothing but their
+ * int32_t / struct output_geometry arguments, so the harness
+ * binary picks up only this header's content with zero
+ * libinput / wayland linkage.
+ *
+ * Single source of truth: editing these functions or the
+ * output_geometry struct here is automatically picked up by
+ * both kloak proper (kloak.h forward-declares 'struct
+ * output_geometry' for its disp_state pointer fields; the full
+ * definition lives below) and the fuzz harness.
+ */
 
-/********************/
-/* global variables */
-/********************/
 
-static double cursor_x = 0.0;
-static double cursor_y = 0.0;
-static double prev_cursor_x = 0.0;
-static double prev_cursor_y = 0.0;
-static double vert_scroll_accum = 0.0;
-static double horiz_scroll_accum = 0.0;
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-static struct disp_state state = { 0 };
-static struct libinput *li = NULL;
-static int inotify_fd = 0;
+/*
+ * Defines the position and dimensions of a screen.
+ */
+struct output_geometry {
+  int32_t x;
+  int32_t y;
+  int32_t width;
+  int32_t height;
+};
 
-static struct pollfd *ev_fds = NULL;
+/*
+ * Determine if a point falls inside an area.
+ *
+ * All arithmetic that combines coordinates with widths/heights is
+ * done in int64_t to avoid signed-integer overflow on
+ * adversarially large geometry inputs. Production callers see
+ * compositor pixel coordinates that never approach INT32_MAX, but
+ * the fuzz harness in fuzz/fuzz_geometry.c does, and UBSan flags
+ * the bare int32_t addition as UB even though x86 wraps it
+ * harmlessly.
+ */
+static __attribute__((unused))
+bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
+  int32_t rect_y, int32_t rect_width, int32_t rect_height) {
+  int64_t rect_right = 0;
+  int64_t rect_bottom = 0;
+  if (x < 0 || y < 0 || rect_x < 0 || rect_y < 0 || rect_width < 0
+    || rect_height < 0) {
+    return false;
+  }
+  rect_right = (int64_t)rect_x + (int64_t)rect_width;
+  rect_bottom = (int64_t)rect_y + (int64_t)rect_height;
+  if (x >= rect_x && (int64_t)x < rect_right
+    && y >= rect_y && (int64_t)y < rect_bottom) {
+    return true;
+  }
+  return false;
+}
 
-static int64_t prev_release_time = 0;
-static TAILQ_HEAD(tailhead_evq, input_packet) evq_head;
+/*
+ * Determine if two screens are touching or overlapping given their
+ * geometries.
+ *
+ * As in check_point_in_area, every addition that combines a
+ * coordinate with a width/height is performed via an int64_t
+ * intermediate. We also reject inputs whose corner coordinates
+ * would overflow int32_t: production callers never produce such
+ * inputs (real screen pixel counts are small) but the fuzz
+ * harness exercises the full int32 range, and the alternative -
+ * letting UBSan trip on every adversarial input - hides any
+ * future real bug behind boilerplate findings.
+ */
+static __attribute__((unused))
+bool check_screen_touch(struct output_geometry scr1,
+  struct output_geometry scr2) {
+  /*
+   * We check for both touching and overlapping screens. Screens are
+   * overlapping if any of one screen's corner points falls inside the area of
+   * the other screen. The criteria to establish touching screens is a bit
+   * tricky, but a shortcut we can take is to simply grow the size of one of
+   * the screens by one pixel in every direction (i.e., subtract one from both
+   * the X and Y position coordinates and then add two to the width and
+   * height). Then any form of screen touching will be seen as an overlap,
+   * including touching at the corners.
+   */
 
-static int32_t max_delay = DEFAULT_MAX_DELAY_MS;
-static int32_t startup_delay = DEFAULT_STARTUP_TIMEOUT_MS;
-static uint32_t cursor_color = 0x00000000;
-static bool should_draw_cursor = true;
-static bool enable_natural_scrolling = false;
+  if (scr1.x < 0 || scr1.y < 0 || scr1.width < 0 || scr1.height < 0
+    || scr2.x < 0 || scr2.y < 0 || scr2.width < 0 || scr2.height < 0) {
+    return false;
+  }
+  /*
+   * Reject inputs whose grown / corner coordinates would step
+   * outside int32_t. +2 is the maximum width/height bump from
+   * the grow step below.
+   */
+  if ((int64_t)scr1.x + (int64_t)scr1.width + 2 > INT32_MAX
+    || (int64_t)scr1.y + (int64_t)scr1.height + 2 > INT32_MAX
+    || (int64_t)scr2.x + (int64_t)scr2.width > INT32_MAX
+    || (int64_t)scr2.y + (int64_t)scr2.height > INT32_MAX) {
+    return false;
+  }
 
-static uint32_t **esc_key_list = NULL;
-static size_t *esc_key_sublist_len = NULL;
-static bool *active_esc_key_list = NULL;
-static size_t esc_key_list_len = 0;
+  if (scr1.x > 0) {
+    scr1.x -= 1;
+    scr1.width += 2;
+  } else {
+    scr1.width += 1;
+  }
+  if (scr1.y > 0) {
+    scr1.y -= 1;
+    scr1.height += 2;
+  } else {
+    scr1.height += 1;
+  }
 
-static LIST_HEAD(listhead_ldi, li_device_info) ldi_head;
+  if (check_point_in_area(scr1.x, scr1.y, scr2.x, scr2.y, scr2.width,
+    scr2.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr1.x + scr1.width, scr1.y, scr2.x, scr2.y,
+    scr2.width, scr2.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr1.x, scr1.y + scr1.height, scr2.x, scr2.y,
+    scr2.width, scr2.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr1.x + scr1.width, scr1.y + scr1.height, scr2.x,
+    scr2.y, scr2.width, scr2.height)) {
+    return true;
+  }
+  /*
+   * It's possible for none of screen 1's corners to be inside screen 2, but
+   * for some of screen 2's corners to be inside screen 1, i.e. in this
+   * configuration:
+   *
+   * +------------------+
+   * |                  |
+   * |               +------------------+
+   * |     Screen 1  |  |  Screen 2     |
+   * |               +------------------+
+   * |                  |
+   * +------------------+
+   *
+   * Therefore we need to repeat the above checks to see if screen 2 has a
+   * corner within screen 1. We do NOT need to grow screen 2 by one pixel in
+   * all directions like we did with screen 1; the growing of screen 1 is
+   * enough to allow touch detection, we just need to actually detect it.
+   */
+  if (check_point_in_area(scr2.x, scr2.y, scr1.x, scr1.y, scr1.width,
+    scr1.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr2.x + scr2.width, scr2.y, scr1.x, scr1.y,
+    scr1.width, scr1.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr2.x, scr2.y + scr2.height, scr1.x, scr1.y,
+    scr1.width, scr1.height)) {
+    return true;
+  }
+  if (check_point_in_area(scr2.x + scr2.width, scr2.y + scr2.height, scr1.x,
+    scr1.y, scr1.width, scr1.height)) {
+    return true;
+  }
+  return false;
+}
+/* === end of kloak_geometry.inc.h === */
 
-static const char *default_esc_key_str
-  = "KEY_RIGHTSHIFT,KEY_ESC";
+/* === kloak_recalc.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure multi-screen geometry-recalculation surface factored out
+ * of recalc_global_space() in kloak.c so fuzz/fuzz_recalc_global_
+ * space.c can exercise the corner-finding + connectivity-graph
+ * traversal + gap-detection logic without dragging in the rest
+ * of the program. Single source of truth: kloak.c #include's
+ * this after kloak_geometry.inc.h (which provides struct
+ * output_geometry + check_screen_touch); the harness #include's
+ * just kloak_geometry.inc.h + this header.
+ *
+ * Production semantics: kloak.c's recalc_global_space() is now a
+ * thin wrapper that calls recalc_global_space_pure() and decides
+ * what to do with each status:
+ *   KLOAK_RECALC_INCOMPLETE  -> silent return (waiting for more
+ *                               output configure events)
+ *   KLOAK_RECALC_GAP         -> 'FATAL ERROR: ... gaps ...' + exit(1)
+ *   KLOAK_RECALC_OK          -> copy the four global_space_* /
+ *                               pointer_space_* fields into
+ *                               disp_state
+ * The exit(1) is intentionally kept out of the pure helper so
+ * libFuzzer can exercise the gap-detection path without treating
+ * the panic as a crash.
+ */
 
-static int64_t start_time = 0;
 
-static int randfd = 0;
+#include <limits.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
 
-static bool did_wayland_init = false;
-static bool exit_on_wl_connect_failure = false;
+/*
+ * Requires the following to be defined by the includer before
+ * this header is processed:
+ *   struct output_geometry { int32_t x, y, width, height; }
+ *   bool check_screen_touch(struct output_geometry,
+ *     struct output_geometry);
+ * kloak.c gets these via kloak_geometry.inc.h; the fuzz harness
+ * #include's kloak_geometry.inc.h directly before including
+ * this file.
+ */
+
+enum kloak_recalc_status {
+  KLOAK_RECALC_INCOMPLETE = 0,
+  KLOAK_RECALC_GAP        = 1,
+  KLOAK_RECALC_OK         = 2
+};
+
+struct kloak_recalc_result {
+  enum kloak_recalc_status status;
+  int32_t global_space_width;
+  int32_t global_space_height;
+  int32_t pointer_space_x;
+  int32_t pointer_space_y;
+};
+
+/*
+ * Walk 'geometries' (an array of pointers, NULL slots skipped),
+ * find the union bounding box and detect whether the screens
+ * form a single connected blob (no gaps). Returns one of the
+ * status codes above; on KLOAK_RECALC_OK the four global / pointer
+ * space fields are filled, otherwise they are 0.
+ *
+ * Bounds on geometries_len: KLOAK_RECALC_MAX_SCREENS (mirrors
+ * kloak.c's MAX_SCREEN_COUNT). The production caller passes the
+ * full MAX_SCREEN_COUNT slot count from disp_state; the harness
+ * supplies a smaller bound but never larger.
+ */
+#ifndef KLOAK_RECALC_MAX_SCREENS
+#define KLOAK_RECALC_MAX_SCREENS 128
+#endif
+
+static __attribute__((unused))
+struct kloak_recalc_result recalc_global_space_pure(
+  struct output_geometry *const *geometries,
+  size_t geometries_len) {
+  struct kloak_recalc_result out = { 0 };
+  int32_t ul_corner_x = INT32_MAX;
+  int32_t ul_corner_y = INT32_MAX;
+  int32_t br_corner_x = 0;
+  int32_t br_corner_y = 0;
+  int32_t cur_geom_x = 0;
+  int32_t cur_geom_y = 0;
+  int32_t cur_geom_width = 0;
+  int32_t cur_geom_height = 0;
+  int32_t temp_br_x = 0;
+  int32_t temp_br_y = 0;
+  struct output_geometry *screen_list[KLOAK_RECALC_MAX_SCREENS];
+  ssize_t screen_list_len = 0;
+  struct output_geometry *conn_screen_list[KLOAK_RECALC_MAX_SCREENS];
+  ssize_t conn_screen_list_len = 0;
+  bool screen_in_conn_list = false;
+  struct output_geometry *conn_screen = NULL;
+  struct output_geometry *cur_screen = NULL;
+  size_t i = 0;
+  ssize_t ci = 0;
+  ssize_t j = 0;
+  ssize_t k = 0;
+
+  if (geometries == NULL) {
+    return out;
+  }
+  if (geometries_len > KLOAK_RECALC_MAX_SCREENS) {
+    geometries_len = KLOAK_RECALC_MAX_SCREENS;
+  }
+
+  for (i = 0; i < geometries_len; i++) {
+    if (geometries[i] == NULL) {
+      continue;
+    }
+    cur_geom_x = geometries[i]->x;
+    cur_geom_y = geometries[i]->y;
+    cur_geom_width = geometries[i]->width;
+    cur_geom_height = geometries[i]->height;
+    if (cur_geom_x < 0 || cur_geom_y < 0
+      || cur_geom_width < 0 || cur_geom_height < 0) {
+      continue;
+    }
+    /*
+     * Reject geometries whose corner coordinates would overflow
+     * int32_t arithmetic. Same int64 guard the fuzz_geometry
+     * harness installed on check_point_in_area /
+     * check_screen_touch.
+     */
+    if ((int64_t)cur_geom_x + (int64_t)cur_geom_width > INT32_MAX
+      || (int64_t)cur_geom_y + (int64_t)cur_geom_height > INT32_MAX) {
+      continue;
+    }
+    screen_list[screen_list_len] = geometries[i];
+    screen_list_len++;
+    if (cur_geom_x < ul_corner_x) {
+      ul_corner_x = cur_geom_x;
+    }
+    if (cur_geom_y < ul_corner_y) {
+      ul_corner_y = cur_geom_y;
+    }
+    temp_br_x = cur_geom_x + cur_geom_width;
+    temp_br_y = cur_geom_y + cur_geom_height;
+    if (temp_br_x > br_corner_x) {
+      br_corner_x = temp_br_x;
+    }
+    if (temp_br_y > br_corner_y) {
+      br_corner_y = temp_br_y;
+    }
+  }
+
+  if (screen_list_len <= 0) {
+    out.status = KLOAK_RECALC_INCOMPLETE;
+    return out;
+  }
+  if (ul_corner_x > br_corner_x) {
+    out.status = KLOAK_RECALC_INCOMPLETE;
+    return out;
+  }
+  if (ul_corner_y > br_corner_y) {
+    out.status = KLOAK_RECALC_INCOMPLETE;
+    return out;
+  }
+
+  conn_screen_list[0] = screen_list[0];
+  conn_screen_list_len = 1;
+
+  /*
+   * Connectivity flood-fill. Start from screen 0, find every
+   * screen that touches one already in the connected set, and
+   * repeat. If conn_screen_list_len == screen_list_len at the
+   * end, the whole set is connected; otherwise there is a gap.
+   */
+  for (ci = 0; ci < conn_screen_list_len; ci++) {
+    for (j = 0; j < screen_list_len; j++) {
+      screen_in_conn_list = false;
+      for (k = 0; k < conn_screen_list_len; k++) {
+        if (screen_list[j] == conn_screen_list[k]) {
+          screen_in_conn_list = true;
+          break;
+        }
+      }
+      if (screen_in_conn_list) {
+        continue;
+      }
+      conn_screen = conn_screen_list[ci];
+      cur_screen = screen_list[j];
+      if (check_screen_touch(*conn_screen, *cur_screen)) {
+        conn_screen_list[conn_screen_list_len] = cur_screen;
+        conn_screen_list_len++;
+      }
+    }
+  }
+
+  if (conn_screen_list_len != screen_list_len) {
+    out.status = KLOAK_RECALC_GAP;
+    return out;
+  }
+
+  out.status = KLOAK_RECALC_OK;
+  out.global_space_width = br_corner_x;
+  out.global_space_height = br_corner_y;
+  out.pointer_space_x = ul_corner_x;
+  out.pointer_space_y = ul_corner_y;
+  return out;
+}
+/* === end of kloak_recalc.inc.h === */
+
+/* === kloak_coord.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure coordinate-conversion helpers factored out of kloak.c so
+ * fuzz/fuzz_coord.c can exercise the global<->local mapping
+ * without dragging in the rest of the program. Single source of
+ * truth: kloak.c #include's this after kloak_geometry.inc.h
+ * (which provides struct output_geometry and check_point_in_area)
+ * and the fuzz harness #include's just these two .inc.h files.
+ *
+ * Production semantics: abs_coord_to_screen_local_coord and
+ * screen_local_coord_to_abs_coord in kloak.c are now thin
+ * wrappers around these.
+ *
+ * Bug class addressed: coord_local_to_abs_pure adds
+ * 'geom->x + x' and 'geom->y + y' in int64_t with a saturating
+ * range check. The original int32_t add was UB on adversarial
+ * compositor geometry (same class fuzz_geometry already flagged
+ * for check_screen_touch / check_point_in_area / recalc_global_
+ * space). Production callers never come close to INT32_MAX, so
+ * behaviour is unchanged for real screens.
+ */
+
+
+#include <limits.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Requires the following to be defined by the includer before this
+ * header is processed:
+ *   struct coord              { int32_t x, y; }
+ *   struct screen_local_coord { int32_t x, y, output_idx; bool valid; }
+ *   struct output_geometry    { int32_t x, y, width, height; }
+ *   bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
+ *     int32_t rect_y, int32_t rect_width, int32_t rect_height);
+ *
+ * kloak.c gets these via kloak.h + kloak_geometry.inc.h. The fuzz
+ * harness defines shims that mirror those types and then
+ * #include's kloak_geometry.inc.h for check_point_in_area before
+ * including this file.
+ */
+
+/*
+ * Look up which output the (x, y) compositor-global coordinate
+ * falls inside, and translate to that output's screen-local
+ * coordinates. Returns an all-zero screen_local_coord (valid =
+ * false, x = y = output_idx = 0) if no output covers the point.
+ *
+ * 'geometries' is an array of pointers; entries may be NULL
+ * (slot reserved but no geometry yet) and those are skipped.
+ */
+static struct screen_local_coord coord_abs_to_local_pure(int32_t x, int32_t y,
+  struct output_geometry *const *geometries,
+  size_t geometries_len) __attribute__((unused));
+static struct screen_local_coord coord_abs_to_local_pure(int32_t x, int32_t y,
+  struct output_geometry *const *geometries,
+  size_t geometries_len) {
+  struct screen_local_coord out_data = { 0 };
+  size_t i = 0;
+
+  if (x < 0 || y < 0) {
+    return out_data;
+  }
+
+  for (i = 0; i < geometries_len; i++) {
+    if (geometries[i] == NULL) {
+      continue;
+    }
+    if (check_point_in_area(x, y, geometries[i]->x, geometries[i]->y,
+      geometries[i]->width, geometries[i]->height)) {
+      out_data.output_idx = (int32_t)i;
+      out_data.x = x - geometries[i]->x;
+      out_data.y = y - geometries[i]->y;
+      out_data.valid = true;
+      return out_data;
+    }
+  }
+
+  return out_data;
+}
+
+/*
+ * Translate a screen-local (x, y) on the given output back to
+ * compositor-global coordinates. Returns {-1, -1} on invalid
+ * input (negative coords, NULL geom, negative geometry fields,
+ * or sum overflowing int32_t).
+ */
+static struct coord coord_local_to_abs_pure(int32_t x, int32_t y,
+  const struct output_geometry *geom) __attribute__((unused));
+static struct coord coord_local_to_abs_pure(int32_t x, int32_t y,
+  const struct output_geometry *geom) {
+  struct coord out_val = { .x = -1, .y = -1 };
+  int64_t abs_x = 0;
+  int64_t abs_y = 0;
+
+  if (geom == NULL) {
+    return out_val;
+  }
+  if (x < 0 || y < 0) {
+    return out_val;
+  }
+  if (geom->x < 0 || geom->y < 0 || geom->width < 0 || geom->height < 0) {
+    return out_val;
+  }
+
+  abs_x = (int64_t)geom->x + (int64_t)x;
+  abs_y = (int64_t)geom->y + (int64_t)y;
+  if (abs_x > INT32_MAX || abs_y > INT32_MAX) {
+    return out_val;
+  }
+
+  out_val.x = (int32_t)abs_x;
+  out_val.y = (int32_t)abs_y;
+  return out_val;
+}
+/* === end of kloak_coord.inc.h === */
+
+/* === kloak_inotify.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure inotify-event buffer parser, factored out of
+ * handle_inotify_events() in kloak.c so the parsing logic can
+ * be fuzzed in isolation (see fuzz/fuzz_inotify_parser.c). The
+ * kernel guarantees the buffer it hands back from read() is
+ * well-formed, but parse_inotify_buffer() now soft-returns on
+ * the first malformed record instead of aborting, so adversarial
+ * fuzz inputs exercise the bounds-check logic without
+ * false-positive crashes.
+ *
+ * The pre-refactor code used assert() at each invariant; those
+ * are defensible against a non-malicious kernel but make the
+ * function impossible to harness because libFuzzer treats
+ * abort() as a crash report. Trading the assertions for silent
+ * early-return also improves production robustness: a
+ * hypothetically misbehaving kernel cannot crash the kloak
+ * process, it just stops processing the rest of the buffer.
+ *
+ * Single source of truth - both kloak.c (via #include below the
+ * existing kloak_parsers / kloak_geometry pattern) and the fuzz
+ * harness see the same parser.
+ */
+
+
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <sys/inotify.h>
+#include <sys/types.h>
+
+typedef void (*inotify_dispatch_fn)(const struct inotify_event *ie);
+
+/*
+ * Walk a buffer of inotify_event records and call dispatch() for
+ * each well-formed record. Stops silently on the first malformed
+ * record (truncated header, ie->len beyond remaining buffer, or
+ * ie->len wide enough to overflow ssize_t arithmetic).
+ *
+ * 'dispatch' may be NULL; the fuzz harness uses that path to
+ * exercise the parser alone, without invoking attach_input_device
+ * / detach_input_device.
+ */
+static void parse_inotify_buffer(const char *buf, ssize_t len,
+  inotify_dispatch_fn dispatch) __attribute__((unused));
+static void parse_inotify_buffer(const char *buf, ssize_t len,
+  inotify_dispatch_fn dispatch) {
+  ssize_t rem_len = 0;
+  /* The kernel-supplied buffer is guaranteed sufficiently
+   * aligned per inotify(7); the cast cannot be UB at runtime for
+   * the production caller. Adversarial fuzz inputs may not be
+   * aligned, but x86 / amd64 / aarch64 all tolerate unaligned
+   * access for the only fields we read (uint32_t mask + uint32_t
+   * len), and the parser does not dereference any wider type. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+  const struct inotify_event *ie = (const struct inotify_event *)buf;
+#pragma GCC diagnostic pop
+  ssize_t struct_len = 0;
+
+  if (buf == NULL || len <= 0) {
+    return;
+  }
+  rem_len = len;
+
+  while (true) {
+    if (rem_len < (ssize_t)sizeof(struct inotify_event)) {
+      return;
+    }
+    /* Guard against ie->len so large the addition below would
+     * overflow ssize_t. */
+    if ((uint32_t)ie->len > (uint32_t)(SSIZE_MAX - sizeof(struct inotify_event))) {
+      return;
+    }
+    struct_len =
+      (ssize_t)sizeof(struct inotify_event) + (ssize_t)ie->len;
+    if (struct_len > rem_len) {
+      return;
+    }
+
+    if (dispatch != NULL) {
+      dispatch(ie);
+    }
+
+    rem_len -= struct_len;
+    if (rem_len <= 0) {
+      return;
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+    ie = (const struct inotify_event *)((const char *)ie + struct_len);
+#pragma GCC diagnostic pop
+  }
+}
+/* === end of kloak_inotify.inc.h === */
+
+/* === kloak_pixbuf.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pixbuf-painting helper factored out of kloak.c so fuzz/
+ * fuzz_draw_block.c can exercise the bounds-clamping +
+ * pixel-write loop without dragging in kloak's wayland / state
+ * surface. Single source of truth: kloak.c #include's this
+ * after kloak.h; the harness #include's just this header.
+ */
+
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/*
+ * Stamp a (2*rad+1) x (2*rad+1) block onto a pixbuf starting at
+ * 'offset' (units of uint32_t pixels) with center (x, y).
+ * Clamps x +/- rad, y +/- rad to the layer's [0, width-1] x
+ * [0, height-1] range. When 'crosshair' is true, only the
+ * vertical / horizontal lines through (x, y) get painted with
+ * 'cursor_color'; the rest are cleared to 0x00000000.
+ *
+ * The arithmetic that builds the pixbuf index is done in
+ * int64_t intermediates: work_y * layer_width can overflow
+ * int32_t for adversarial layer_width values (production never
+ * gets near INT32_MAX, but a hostile compositor / fuzzer can).
+ * Production caller behaviour is unchanged for the small
+ * pixel-count layer_widths kloak ever sees in real screens.
+ *
+ * Previously a 'assert(should_draw_cursor)' guarded the function
+ * entry; the assert was a precondition check ('do not call when
+ * cursor drawing is disabled'). Removed during the extract so
+ * the helper is callable from the fuzz harness, which always
+ * paints unconditionally. Production callers are still gated by
+ * the should_draw_cursor check in draw_frame() before they
+ * reach this function.
+ */
+static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
+  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair,
+  uint32_t cursor_color) __attribute__((unused));
+static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
+  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair,
+  uint32_t cursor_color) {
+  int32_t start_x = 0;
+  int32_t start_y = 0;
+  int32_t end_x = 0;
+  int32_t end_y = 0;
+  int32_t work_x = 0;
+  int32_t work_y = 0;
+  int64_t step_sx = 0;
+  int64_t step_sy = 0;
+  int64_t step_ex = 0;
+  int64_t step_ey = 0;
+
+  /*
+   * Promote the four x/y +/- rad arithmetic sites to int64_t and
+   * clamp every result to the layer's [0, dim-1] range. The
+   * fuzz_draw_block harness in CFLite caught two issues here:
+   * (a) 'x - rad' with x near INT32_MIN and rad large overflows
+   *     int32_t and traps under -ftrapv, and
+   * (b) a negative rad makes 'x - rad' larger than INT32_MAX, so
+   *     even after the int64_t promotion the bare (int32_t) cast
+   *     wraps to a negative value -- which the loop then uses as
+   *     an array index and reads outside the pixbuf.
+   * Clamping every step to [0, dim-1] makes the loop a no-op
+   * when start > end after clamping (correct production
+   * behaviour: nothing to paint). Production callers pass small
+   * cursor coordinates and a tiny non-negative rad, so the
+   * additional clamps never fire for real screens.
+   */
+  step_sx = (int64_t)x - (int64_t)rad;
+  step_sy = (int64_t)y - (int64_t)rad;
+  step_ex = (int64_t)x + (int64_t)rad;
+  step_ey = (int64_t)y + (int64_t)rad;
+  if (step_sx < 0) step_sx = 0;
+  if (step_sy < 0) step_sy = 0;
+  if (step_ex < 0) step_ex = 0;
+  if (step_ey < 0) step_ey = 0;
+  if (step_sx >= (int64_t)layer_width)  step_sx = (int64_t)layer_width  - 1;
+  if (step_sy >= (int64_t)layer_height) step_sy = (int64_t)layer_height - 1;
+  if (step_ex >= (int64_t)layer_width)  step_ex = (int64_t)layer_width  - 1;
+  if (step_ey >= (int64_t)layer_height) step_ey = (int64_t)layer_height - 1;
+  start_x = (int32_t)step_sx;
+  start_y = (int32_t)step_sy;
+  end_x   = (int32_t)step_ex;
+  end_y   = (int32_t)step_ey;
+
+  for (work_y = start_y; work_y <= end_y; work_y++) {
+    for (work_x = start_x; work_x <= end_x; work_x++) {
+      int64_t idx = (int64_t)offset
+        + (int64_t)work_y * (int64_t)layer_width
+        + (int64_t)work_x;
+      if (crosshair && work_x == x) {
+        pixbuf[idx] = cursor_color;
+      } else if (crosshair && work_y == y) {
+        pixbuf[idx] = cursor_color;
+      } else {
+        pixbuf[idx] = 0x00000000;
+      }
+    }
+  }
+}
+/* === end of kloak_pixbuf.inc.h === */
+
+/* === kloak_traverse.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure line-walking helper factored out of kloak.c so
+ * fuzz/fuzz_traverse_line.c can exercise the slope / fabs /
+ * int32-cast arithmetic without dragging in the rest of kloak.
+ * Single source of truth: kloak.c #include's this after kloak.h
+ * (which defines 'struct coord'); the fuzz harness defines its
+ * own equivalent 'struct coord' shim before including this
+ * header.
+ *
+ * Production semantics unchanged. The function walks a 2D line
+ * from 'start' towards 'end' by 'pos' pixels and returns the
+ * intermediate coord; update_virtual_cursor() iterates pos from
+ * 0 to the integer distance between the points.
+ */
+
+
+#include <limits.h>
+#include <math.h>
+#include <stdint.h>
+
+/*
+ * Requires 'struct coord { int32_t x; int32_t y; }' to be defined
+ * by the includer. kloak.h provides it for production builds; the
+ * fuzz harness defines an identical shim.
+ */
+
+/*
+ * Clamp a double to the signed-int32 range. The original
+ * traverse_line did '(int32_t)((double) pos * steep)' directly;
+ * that cast is undefined behaviour when the double exceeds
+ * int32_t range, which fuzz/fuzz_traverse_line.c exposed at
+ * adversarial inputs. Production callers stay well below
+ * INT32_MAX so behaviour is unchanged for real geometry.
+ */
+static int64_t kloak_clamp_double_to_int32(double d) __attribute__((unused));
+static int64_t kloak_clamp_double_to_int32(double d) {
+  if (d >= (double)INT32_MAX) return INT32_MAX;
+  if (d <= (double)INT32_MIN) return INT32_MIN;
+  return (int64_t)d;
+}
+
+static struct coord traverse_line(struct coord start, struct coord end,
+  int32_t pos) __attribute__((unused));
+static struct coord traverse_line(struct coord start, struct coord end,
+  int32_t pos) {
+  struct coord out_val = { 0 };
+  double num = 0.0;
+  double denom = 0.0;
+  double slope = 0.0;
+  double steep = 0.0;
+  int64_t step_x = 0;
+  int64_t step_y = 0;
+  int64_t off = 0;
+
+  num = ((double) end.y) - ((double) start.y);
+  denom = ((double) start.x) - ((double) end.x);
+
+  if (pos == 0) return start;
+
+  if ((int64_t)(denom) == 0) {
+    /* vertical line */
+    step_x = (int64_t)start.x;
+    if (start.y < end.y) {
+      step_y = (int64_t)start.y + (int64_t)pos;
+    } else {
+      step_y = (int64_t)start.y - (int64_t)pos;
+    }
+    goto clamp_and_return;
+  }
+
+  slope = num / denom;
+  steep = fabs(slope);
+
+  if (steep < 1) {
+    if (start.x < end.x) {
+      step_x = (int64_t)start.x + (int64_t)pos;
+    } else {
+      step_x = (int64_t)start.x - (int64_t)pos;
+    }
+    off = kloak_clamp_double_to_int32((double) pos * steep);
+    if (start.y < end.y) {
+      step_y = (int64_t)start.y + off;
+    } else {
+      step_y = (int64_t)start.y - off;
+    }
+  } else {
+    if (start.y < end.y) {
+      step_y = (int64_t)start.y + (int64_t)pos;
+    } else {
+      step_y = (int64_t)start.y - (int64_t)pos;
+    }
+    off = kloak_clamp_double_to_int32((double) pos * (1.0 / steep));
+    if (start.x < end.x) {
+      step_x = (int64_t)start.x + off;
+    } else {
+      step_x = (int64_t)start.x - off;
+    }
+  }
+
+clamp_and_return:
+  if (step_x > INT32_MAX) step_x = INT32_MAX;
+  if (step_x < INT32_MIN) step_x = INT32_MIN;
+  if (step_y > INT32_MAX) step_y = INT32_MAX;
+  if (step_y < INT32_MIN) step_y = INT32_MIN;
+  out_val.x = (int32_t)step_x;
+  out_val.y = (int32_t)step_y;
+  return out_val;
+}
+/* === end of kloak_traverse.inc.h === */
+
+/* === kloak_walk_cursor.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure 'glide along the wall' cursor walker, factored out of
+ * the inner loop of update_virtual_cursor() in kloak.c so
+ * fuzz/fuzz_walk_cursor.c can exercise the algorithm against
+ * adversarial start/end coordinates + screen layouts without
+ * dragging in libinput / wayland / cursor / scroll globals.
+ *
+ * The algorithm: walk a straight line from start to end, one
+ * pixel at a time. If the next pixel is off-screen, try to
+ * step back one pixel in whichever direction we just moved and
+ * adjust 'end' so the remaining walk stays in that dimension.
+ * If none of the four directional rebounds land on a screen,
+ * snap to the previous on-screen pixel and stop. The walk loop
+ * terminates when both axes have reached 'end'.
+ *
+ * Production wrapper (kloak.c::update_virtual_cursor) feeds the
+ * result back into the cursor_x / cursor_y globals and flags
+ * the relevant drawable_layer for redraw. The pure helper does
+ * neither - it just returns the final coord and lets the caller
+ * apply it.
+ *
+ * Safety bound: 'max_iterations'. Production passes a large
+ * value bounded by the manhattan distance between start and
+ * end (a few thousand for real cursor moves). The fuzz harness
+ * caps it tightly so an adversarial geometry that would
+ * theoretically infinite-loop the glide algorithm shows up as
+ * a bounded-time test failure rather than as a libFuzzer hang.
+ */
+
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/*
+ * Requires the following to be defined by the includer before
+ * this header is processed:
+ *   struct coord              { int32_t x, y; }
+ *   struct screen_local_coord { int32_t x, y, output_idx; bool valid; }
+ *   struct output_geometry    { int32_t x, y, width, height; }
+ *   coord_abs_to_local_pure(int32_t, int32_t, ...) -> struct screen_local_coord
+ *   traverse_line(struct coord, struct coord, int32_t) -> struct coord
+ *
+ * kloak.c #include's this after kloak_coord.inc.h and
+ * kloak_traverse.inc.h. The fuzz harness defines shims for the
+ * structs and includes the same .inc.h headers.
+ */
+
+/*
+ * Walk a 2D cursor from 'start' to 'end', constrained to
+ * remain within the union of the given output geometries.
+ *
+ * Returns the final cursor position. 'reached_end' is set to
+ * true if both axes hit 'end' before max_iterations expired,
+ * false otherwise (degenerate input, off-screen-stuck, or
+ * iteration-cap hit).
+ */
+struct kloak_walk_cursor_result {
+  struct coord final_pos;
+  bool reached_end;
+};
+
+static __attribute__((unused))
+struct kloak_walk_cursor_result walk_cursor_pure(
+  struct coord start, struct coord end,
+  struct output_geometry *const *geometries,
+  size_t geometries_len,
+  int32_t max_iterations) {
+  struct kloak_walk_cursor_result out = { 0 };
+  struct coord prev_trav_coord = { 0 };
+  struct coord trav_coord = { 0 };
+  struct screen_local_coord trav_scr_coord = { 0 };
+  bool end_x_hit = false;
+  bool end_y_hit = false;
+  int32_t i = 0;
+  int32_t iter_count = 0;
+
+  out.final_pos = start;
+  prev_trav_coord = start;
+
+  for (i = 0; iter_count < max_iterations; i++, iter_count++) {
+    trav_coord = traverse_line(start, end, i);
+    if (trav_coord.x == end.x) end_x_hit = true;
+    if (trav_coord.y == end.y) end_y_hit = true;
+    trav_scr_coord = coord_abs_to_local_pure(trav_coord.x, trav_coord.y,
+      geometries, geometries_len);
+    if (!trav_scr_coord.valid) {
+      /*
+       * Walked off-screen. Try the four directional rebounds:
+       * step back one pixel in whichever axis we just moved
+       * and re-aim 'end' to keep the rest of the walk in that
+       * single dimension. The four prev_trav_coord.X < / >
+       * branches mirror the four production code paths.
+       *
+       * Each rebound resets i = -1 so the next loop iteration
+       * starts the walk from i = 0 against the adjusted start/
+       * end pair. iter_count keeps counting so an adversarial
+       * geometry that always rebounds without making progress
+       * is bounded by max_iterations.
+       */
+      if (prev_trav_coord.x < trav_coord.x) {
+        trav_scr_coord = coord_abs_to_local_pure(trav_coord.x - 1,
+          trav_coord.y, geometries, geometries_len);
+        if (trav_scr_coord.valid) {
+          start.x = trav_coord.x - 1;
+          start.y = trav_coord.y;
+          end.x = trav_coord.x - 1;
+          i = -1;
+          continue;
+        }
+      }
+      if (prev_trav_coord.x > trav_coord.x) {
+        trav_scr_coord = coord_abs_to_local_pure(trav_coord.x + 1,
+          trav_coord.y, geometries, geometries_len);
+        if (trav_scr_coord.valid) {
+          start.x = trav_coord.x + 1;
+          start.y = trav_coord.y;
+          end.x = trav_coord.x + 1;
+          i = -1;
+          continue;
+        }
+      }
+      if (prev_trav_coord.y < trav_coord.y) {
+        trav_scr_coord = coord_abs_to_local_pure(trav_coord.x,
+          trav_coord.y - 1, geometries, geometries_len);
+        if (trav_scr_coord.valid) {
+          start.y = trav_coord.y - 1;
+          start.x = trav_coord.x;
+          end.y = trav_coord.y - 1;
+          i = -1;
+          continue;
+        }
+      }
+      if (prev_trav_coord.y > trav_coord.y) {
+        trav_scr_coord = coord_abs_to_local_pure(trav_coord.x,
+          trav_coord.y + 1, geometries, geometries_len);
+        if (trav_scr_coord.valid) {
+          start.y = trav_coord.y + 1;
+          start.x = trav_coord.x;
+          end.y = trav_coord.y + 1;
+          i = -1;
+          continue;
+        }
+      }
+      /* Stuck - snap to the previous on-screen pixel and stop. */
+      out.final_pos = prev_trav_coord;
+      return out;
+    }
+    if (end_x_hit && end_y_hit) {
+      out.final_pos = end;
+      out.reached_end = true;
+      return out;
+    }
+    prev_trav_coord = trav_coord;
+  }
+  /* iteration cap hit - return the last on-screen coord we saw */
+  out.final_pos = prev_trav_coord;
+  return out;
+}
+/* === end of kloak_walk_cursor.inc.h === */
+
+/* === kloak_layer_dims.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure layer-dimension validator for the (width, height) pair
+ * that a Wayland layer_surface_v1 'configure' event carries.
+ * Factored out of layer_surface_configure() in kloak.c so
+ * fuzz/fuzz_layer_dims.c can exercise the integer-overflow
+ * arithmetic without having to bring in libwayland / shm /
+ * mmap.
+ *
+ * Returns four int32_t derivatives (width, height, stride, size)
+ * + a 'valid' flag. All four arithmetic sites are performed in
+ * int64_t and the result is rejected before assignment if it
+ * would overflow int32_t - the original inline code did the
+ * multiplication in int32_t and *then* asserted the bounds,
+ * which means under -ftrapv the multiplication would trap before
+ * the assertion could fire.
+ *
+ * Production wrapper in kloak.c still treats an invalid result
+ * as a fatal compositor error (the assertions previously did
+ * the same thing for the precondition pair). The pure variant
+ * just returns valid=false.
+ */
+
+
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifndef KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES
+#define KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES 3
+#endif
+
+struct kloak_layer_dims {
+  int32_t width;
+  int32_t height;
+  int32_t stride;
+  int32_t size;
+  bool valid;
+};
+
+/*
+ * Wayland sends width/height as uint32_t; check that each one
+ * fits in our int32_t derivative space, and that the cascading
+ * 'stride = width * 4' and 'size = stride * height * frame_count'
+ * arithmetic do not overflow int32_t. Production callers see
+ * sub-megapixel dimensions; the harness sweeps the full uint32
+ * range.
+ */
+static __attribute__((unused))
+struct kloak_layer_dims compute_layer_dims_pure(uint32_t width,
+  uint32_t height) {
+  struct kloak_layer_dims out = { 0 };
+  int64_t stride64 = 0;
+  int64_t size64 = 0;
+  int64_t total64 = 0;
+
+  /* width must fit after multiplying by 4 (stride is bytes per
+   * row at 4 BPP), and height must fit in int32 directly. */
+  if (width > (uint32_t)(INT32_MAX / 4)) {
+    return out;
+  }
+  if (height > (uint32_t)INT32_MAX) {
+    return out;
+  }
+
+  stride64 = (int64_t)width * 4;
+  size64 = stride64 * (int64_t)height;
+
+  /* size64 must fit in int32_t. Also bound the post-frames
+   * total at int32_t to keep 'layer->size * MAX_UNRELEASED_
+   * FRAMES' (which kloak.c hands to mmap / wl_shm_create_pool)
+   * representable. Computing total64 BEFORE the size64 bound
+   * is checked would let total64 = size64 * 3 overflow int64
+   * itself (size64 max = INT32_MAX * INT32_MAX = 4.6e18, * 3
+   * = 1.4e19 > INT64_MAX) - which fuzz_layer_dims caught on
+   * the first CFLite run.
+   *
+   * No '< 0' branch on either: after the width/height upper
+   * bounds at the top of the function, stride64 = width * 4
+   * is in [0, INT32_MAX], size64 = stride64 * height is in
+   * [0, INT32_MAX * INT32_MAX], and total64 = size64 * 3 is
+   * provably non-negative. CodeQL flagged the original 'total64
+   * < 0' as unreachable. */
+  if (size64 > INT32_MAX) {
+    return out;
+  }
+  total64 = size64 * KLOAK_LAYER_DIMS_MAX_UNRELEASED_FRAMES;
+  if (total64 > INT32_MAX) {
+    return out;
+  }
+
+  out.width  = (int32_t)width;
+  out.height = (int32_t)height;
+  out.stride = (int32_t)stride64;
+  out.size   = (int32_t)size64;
+  out.valid  = true;
+  return out;
+}
+/* === end of kloak_layer_dims.inc.h === */
+
+/* === kloak_poll_timeout.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure saturating int64 -> int helper for kloak's poll() timeout
+ * calculation, factored out of calc_poll_timeout() in kloak.c so
+ * fuzz/fuzz_poll_timeout.c can exercise the saturation logic
+ * over the full int64 range without needing the TAILQ /
+ * current_time_ms() / packet-queue globals.
+ *
+ * Production semantics: calc_poll_timeout() in kloak.c is now a
+ * thin wrapper that pulls TAILQ_FIRST and current_time_ms(),
+ * delegates the (sched_time - current_time) saturating subtract
+ * to this helper, and returns -1 on no-packet.
+ *
+ * Why a helper at all: production sched_time and current_time
+ * are both clock-derived (positive, close together) so the int64
+ * subtraction never overflows in practice. A hostile or buggy
+ * caller passing INT64_MIN / INT64_MAX could trigger UB though,
+ * and -ftrapv would catch it at runtime - so do the subtract via
+ * an int128-style decomposition that cannot trap.
+ */
+
+
+#include <limits.h>
+#include <stdint.h>
+
+/*
+ * Compute 'sched_time - current_time' in saturated int range.
+ * Returns:
+ *   < 0 (clamped to 0):           sched_time is now or past
+ *   in [0, INT_MAX]:              the actual delay in ms
+ *   INT_MAX:                       delay > INT_MAX ms (saturate)
+ *
+ * The int64 subtraction is performed safely - if 'sched_time -
+ * current_time' would overflow int64 the result is clamped to
+ * INT_MAX (over) or 0 (under) before the int cast.
+ */
+static __attribute__((unused))
+int kloak_poll_timeout_pure(int64_t sched_time, int64_t current_time) {
+  int64_t timeout_duration = 0;
+
+  /* Saturate the subtraction itself: if sched_time and current_
+   * time are far apart enough that subtracting overflows int64,
+   * fall back to the obvious saturation. */
+  if (current_time < 0 && sched_time > INT64_MAX + current_time) {
+    /* sched_time - current_time would overflow positively */
+    return INT_MAX;
+  }
+  if (current_time > 0 && sched_time < INT64_MIN + current_time) {
+    /* sched_time - current_time would overflow negatively */
+    return 0;
+  }
+
+  timeout_duration = sched_time - current_time;
+  if (timeout_duration < 0) {
+    return 0;
+  }
+  if (timeout_duration > INT_MAX) {
+    return INT_MAX;
+  }
+  return (int)timeout_duration;
+}
+/* === end of kloak_poll_timeout.inc.h === */
+
+/* === kloak_scroll_ticks.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure scroll-tick accumulator helper extracted from
+ * get_ticks_from_scroll_accum() in kloak.c so fuzz/fuzz_scroll_
+ * ticks.c can exercise the float-to-int32 cast + the int32
+ * multiplication without the production assert() preconditions
+ * firing as fuzz-time aborts.
+ *
+ * Production calls libinput which always feeds finite, sane
+ * doubles; the asserts in the kloak.c wrapper catch any
+ * libinput / arithmetic regression. The pure variant takes the
+ * same input and silently returns 'valid = false' for inputs
+ * that would otherwise violate a precondition, so the harness
+ * can sweep the full double-bit range without false-positive
+ * crashes.
+ */
+
+
+#include <limits.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifndef SCROLL_UNITS_PER_TICK
+#define SCROLL_UNITS_PER_TICK 120
+#endif
+#ifndef SCROLL_UNITS_PER_TICK_D
+#define SCROLL_UNITS_PER_TICK_D 120.0
+#endif
+
+struct kloak_scroll_ticks_result {
+  int32_t ticks;         /* integer number of consumed scroll ticks */
+  double  new_accum;     /* what scroll_accum should be after consume */
+  bool    valid;         /* false on out-of-range / non-finite input */
+};
+
+/*
+ * Given the current floating-point scroll accumulator, return:
+ *   { ticks=0,  new_accum=scroll_accum, valid=true } if the
+ *     accumulator is zero (nothing to consume yet),
+ *   { ticks=N,  new_accum=scroll_accum - N*SCROLL_UNITS_PER_TICK,
+ *     valid=true } in the normal case,
+ *   { valid=false } if the input is non-finite or out of the
+ *     representable scroll-ticks range.
+ *
+ * The precondition asserts that the production wrapper uses are
+ * deliberately encoded here as silent rejects so the fuzz
+ * harness can drive adversarial doubles.
+ */
+static __attribute__((unused))
+struct kloak_scroll_ticks_result get_ticks_from_scroll_accum_pure(
+  double scroll_accum) {
+  struct kloak_scroll_ticks_result out = { 0 };
+  double scroll_ticks_d = 0.0;
+  int32_t scroll_ticks = 0;
+
+  if (!isfinite(scroll_accum)) {
+    return out;
+  }
+  out.new_accum = scroll_accum;
+  out.valid = true;
+  if (fpclassify(scroll_accum) == FP_ZERO) {
+    return out;
+  }
+  scroll_ticks_d = scroll_accum / SCROLL_UNITS_PER_TICK_D;
+  /* We intentionally compare against SCROLL_UNITS_PER_TICK (the
+   * int constant) rather than SCROLL_UNITS_PER_TICK_D so the
+   * threshold rounds DOWN slightly, leaving margin against the
+   * (int32_t) cast below. Matches the production wrapper's
+   * pre-extraction asserts. */
+  if (scroll_ticks_d > ((double)INT32_MAX / SCROLL_UNITS_PER_TICK)) {
+    out.valid = false;
+    return out;
+  }
+  if (scroll_ticks_d < ((double)INT32_MIN / SCROLL_UNITS_PER_TICK)) {
+    out.valid = false;
+    return out;
+  }
+  scroll_ticks = (int32_t)scroll_ticks_d;
+  out.ticks = scroll_ticks;
+  if (scroll_ticks != 0) {
+    out.new_accum = scroll_accum
+      + -((double)scroll_ticks * SCROLL_UNITS_PER_TICK_D);
+  }
+  return out;
+}
+/* === end of kloak_scroll_ticks.inc.h === */
+
+/* === kloak_keymap_check.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure pre-xkb keymap-buffer validation, factored out of
+ * kb_handle_keymap() in kloak.c so fuzz/fuzz_keymap_check.c
+ * can drive the format-validation + NUL-terminator-within-
+ * bounds check that protects xkbcommon from a malicious /
+ * malformed compositor-supplied keymap string.
+ *
+ * Production kb_handle_keymap() then mmaps the fd, calls this
+ * validator on the mapping, and only hands the buffer to
+ * xkb_keymap_new_from_string() when both checks pass. The xkb
+ * call itself remains a libxkbcommon black box and is not
+ * fuzzed here (see CFLite #145 / #146 - blocked on the run-
+ * fuzzers container being upgraded off Ubuntu 20.04 which has
+ * xkbcommon 0.10 with its own parser bugs).
+ */
+
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#ifndef KLOAK_KEYMAP_XKB_V1_FORMAT
+/* Same constant as WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 from
+ * wayland-client-protocol.h (=1). Defining it locally keeps
+ * this header free of wayland linkage so the fuzz harness can
+ * include it without dragging libwayland in. */
+#define KLOAK_KEYMAP_XKB_V1_FORMAT 1u
+#endif
+
+struct kloak_keymap_check_result {
+  bool format_supported;   /* format == XKB_V1 */
+  bool null_terminated;    /* memchr found '\0' within 'size' bytes */
+};
+
+/*
+ * Validate a Wayland-supplied keymap buffer before it is
+ * handed to xkb_keymap_new_from_string. The buffer must be
+ * NUL-terminated (XKB v1 spec) AND the format identifier must
+ * match XKB v1. A NULL buffer with size > 0 is a kernel /
+ * compositor bug; treat it as not-NUL-terminated.
+ *
+ * The harness sweeps (format, buf, size) tuples; production
+ * passes the wl_keyboard 'format' integer + the mmap'd region.
+ */
+static __attribute__((unused))
+struct kloak_keymap_check_result check_keymap_buf_pure(
+  uint32_t format, const char *buf, size_t size) {
+  struct kloak_keymap_check_result out = { false, false };
+
+  out.format_supported = (format == KLOAK_KEYMAP_XKB_V1_FORMAT);
+  if (buf == NULL || size == 0U) {
+    return out;
+  }
+  if (memchr(buf, '\0', size) != NULL) {
+    out.null_terminated = true;
+  }
+  return out;
+}
+/* === end of kloak_keymap_check.inc.h === */
+
+/* === kloak_parsers.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure-parser surface for kloak's CLI. Included by both
+ * src/kloak.c and by the libFuzzer harnesses in fuzz/. By design
+ * the functions here are exit()-free (return bool / 0 on bad
+ * input - see kloak.c:892's comment from before this split) so
+ * they can be fuzzed in isolation. The fuzz harness binary picks
+ * up only this header's content and thus has zero transitive
+ * libinput / wayland linkage, which is what lets it run inside
+ * the OSS-Fuzz ClusterFuzzLite run-fuzzers container (which
+ * ships only libc-class runtime libs).
+ *
+ * Single source of truth: editing the parsers / key table here
+ * is automatically picked up by both kloak proper (via kloak.c's
+ * #include) and the fuzz harnesses.
+ *
+ * The functions are 'static' so each translation unit that
+ * #include's this header gets its own private copy with internal
+ * linkage. No name-collision risk when linking the harnesses
+ * against the wayland-scanner-generated protocol .c files (which
+ * never reference these symbols).
+ */
+
+
+#include <errno.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <linux/input-event-codes.h>
+
+/*
+ * Defines an evdev key code and the corresponding string.
+ */
+struct key_name_value {
+    const char *name;
+    const uint32_t value;
+};
 
 static struct key_name_value key_table[] = {
   {"KEY_ESC", KEY_ESC},
@@ -260,12 +1629,106 @@ static struct key_name_value key_table[] = {
   {NULL, 0}
 };
 
-/*********************/
-/* utility functions */
-/*********************/
+/*
+ * Both this and parse_uint32_arg make it the caller's responsibility to
+ * terminate the application if the parse fails. This it to make it easier to
+ * fuzz kloak.
+ */
+static __attribute__((unused))
+bool parse_uint31_arg(const char *val, int base, int32_t *out) {
+  char *val_endchar = NULL;
+  uint64_t val_int = 0;
 
-static void *safe_calloc(size_t nmemb, size_t size) {
-  void *out_ptr = calloc(nmemb, size);
+  if (val == NULL || out == NULL) {
+    return false;
+  }
+  if (*val == '\0') {
+    return false;
+  }
+  errno = 0;
+  val_int = strtoul(val, &val_endchar, base);
+  if (errno == ERANGE) {
+    return false;
+  }
+  if (*val_endchar != '\0') {
+    return false;
+  }
+  if (val_int > INT32_MAX) {
+    return false;
+  }
+  *out = (int32_t)(val_int);
+  return true;
+}
+
+static __attribute__((unused))
+bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
+  char *val_endchar = NULL;
+  uint64_t val_int = 0;
+
+  if (val == NULL || out == NULL) {
+    return false;
+  }
+  if (*val == '\0') {
+    return false;
+  }
+  errno = 0;
+  val_int = strtoul(val, &val_endchar, base);
+  if (errno == ERANGE) {
+    return false;
+  }
+  if (*val_endchar != '\0') {
+    return false;
+  }
+  if (val_int > UINT32_MAX) {
+    return false;
+  }
+  *out = (uint32_t)(val_int);
+  return true;
+}
+
+static __attribute__((unused))
+uint32_t lookup_keycode(const char *name) {
+  struct key_name_value *p = NULL;
+
+  for (p = key_table; p->name != NULL; p++) {
+    if (strcmp(p->name, name) == 0) {
+      return p->value;
+    }
+  }
+  return 0;
+}
+
+/*
+ * parse_esc_key_str() parses the --esc-keys CLI argument's value
+ * (a comma-separated list of pipe-separated key-name groups, e.g.
+ * "KEY_LEFTSHIFT|KEY_RIGHTSHIFT,KEY_ESC") into the four module-
+ * scope globals below. Returns false on the first malformed token
+ * (empty entry, unknown key name); the caller is responsible for
+ * terminating the process. Designed exit()-free so it can be a
+ * libFuzzer target; see fuzz/fuzz_parse_esc_key_str.c.
+ *
+ * The block is gated by KLOAK_INCLUDE_ESC_KEY_PARSER so the three
+ * simple-parser harnesses (fuzz_parse_uint31 / fuzz_parse_uint32
+ * / fuzz_lookup_keycode) - which do not call parse_esc_key_str -
+ * skip the safe_strdup / safe_reallocarray forward decls and
+ * avoid -Wundefined-internal warnings for those symbols.
+ */
+
+/*
+ * Forward-declare safe_strdup / safe_reallocarray so the parser
+ * body below compiles in any consuming TU. Each consuming TU
+ * supplies its own definitions: kloak.c has the production
+ * versions (abort on OOM with a FATAL ERROR message), the fuzz
+ * harness supplies minimal abort()-on-OOM stubs.
+ */
+/* safe_strdup() / safe_reallocarray() are defined here (rather
+ * than alongside the other safe_* wrappers in the production
+ * section below) because parse_esc_key_str() - a pure helper -
+ * calls them. Having the definitions always visible means the
+ * fuzz harnesses that include kloak.c with KLOAK_FUZZ do not
+ * need to provide their own stubs. */
+static char *safe_strdup(const char *s) {
+  char *out_ptr = strdup(s);
   if (out_ptr == NULL) {
     fprintf(stderr,
       "FATAL ERROR: Could not allocate memory: %s\n", strerror(errno));
@@ -284,8 +1747,322 @@ static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size) {
   return out_ptr;
 }
 
-static char *safe_strdup(const char *s) {
-  char *out_ptr = strdup(s);
+static uint32_t **esc_key_list = NULL;
+static size_t *esc_key_sublist_len = NULL;
+static bool *active_esc_key_list = NULL;
+static size_t esc_key_list_len = 0;
+
+static __attribute__((unused))
+bool parse_esc_key_str(const char *esc_key_str) {
+  char *esc_key_str_copy = safe_strdup(esc_key_str);
+  char *orig_key_str_copy = esc_key_str_copy;
+  char *root_token = NULL;
+  const char *sub_token = NULL;
+  size_t i = 0;
+  size_t j = 0;
+
+  for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
+    if (root_token[0] == '\0' ) {
+      fprintf(stderr,
+        "FATAL ERROR: Empty key name specified in escape key list!\n");
+      free(orig_key_str_copy);
+      return false;
+    }
+
+    esc_key_list_len++;
+    esc_key_list = safe_reallocarray(esc_key_list, esc_key_list_len,
+      sizeof(uint32_t *));
+    esc_key_sublist_len = safe_reallocarray(esc_key_sublist_len,
+      esc_key_list_len, sizeof(size_t));
+    active_esc_key_list = safe_reallocarray(active_esc_key_list,
+      esc_key_list_len, sizeof(bool));
+    esc_key_list[i] = NULL;
+    esc_key_sublist_len[i] = 0;
+    active_esc_key_list[i] = false;
+
+    for (j = 0; ((sub_token = strsep(&root_token, "|")) != NULL); j++)  {
+      if (sub_token[0] == '\0') {
+        fprintf(stderr,
+          "FATAL ERROR: Empty key name specified in escape key list!\n");
+        free(orig_key_str_copy);
+        return false;
+      }
+
+      esc_key_sublist_len[i]++;
+      esc_key_list[i] = safe_reallocarray(esc_key_list[i],
+        esc_key_sublist_len[i], sizeof(uint32_t));
+      esc_key_list[i][j] = lookup_keycode(sub_token);
+      if (esc_key_list[i][j] == 0) {
+        fprintf(stderr, "FATAL ERROR: Unrecognized Key name '%s'!\n",
+          sub_token);
+        free(orig_key_str_copy);
+        return false;
+      }
+    }
+  }
+
+  free(orig_key_str_copy);
+  return true;
+}
+
+/*
+ * reset_esc_key_state() releases everything parse_esc_key_str()
+ * allocated into the four globals above and zeroes them, so a
+ * subsequent parse starts from a clean slate. The production
+ * binary parses --esc-keys exactly once and never calls this;
+ * libFuzzer harnesses call it between iterations to avoid
+ * unbounded memory growth.
+ */
+static void reset_esc_key_state(void) __attribute__((unused));
+static void reset_esc_key_state(void) {
+  for (size_t k = 0; k < esc_key_list_len; k++) {
+    free(esc_key_list[k]);
+  }
+  free(esc_key_list);
+  esc_key_list = NULL;
+  free(esc_key_sublist_len);
+  esc_key_sublist_len = NULL;
+  free(active_esc_key_list);
+  active_esc_key_list = NULL;
+  esc_key_list_len = 0;
+}
+
+/*
+ * Pure panic-combo state-machine update, factored out of
+ * register_esc_combo_event() in kloak.c so it can be fuzzed
+ * without libinput linkage. The function takes the esc-key
+ * state as explicit parameters rather than reading the module-
+ * scope globals; the production caller wires the globals
+ * through.
+ *
+ * Behavioural contract: for each combo in 'list', if 'key'
+ * matches any of its sub-tokens, set active[i] = pressed.
+ * Returns true iff every combo's active[] is true, i.e. the
+ * panic combo is fully held. The production caller calls
+ * exit(0) on true; the fuzz harness only observes.
+ */
+static bool esc_combo_update(uint32_t key, bool pressed,
+  uint32_t **list, const size_t *sublist_lens, size_t list_len,
+  bool *active) __attribute__((unused));
+static bool esc_combo_update(uint32_t key, bool pressed,
+  uint32_t **list, const size_t *sublist_lens, size_t list_len,
+  bool *active) {
+  if (list == NULL || sublist_lens == NULL || active == NULL) {
+    return false;
+  }
+  for (size_t i = 0; i < list_len; i++) {
+    if (list[i] == NULL) {
+      continue;
+    }
+    for (size_t j = 0; j < sublist_lens[i]; j++) {
+      if (list[i][j] != key) {
+        continue;
+      }
+      active[i] = pressed;
+      break;
+    }
+  }
+  if (list_len == 0) {
+    /* Empty combo set: production behaviour was 'hit_exit
+     * remains true and we exit(0)'. Mirror it here so the
+     * regression test catches any inversion of that signal. */
+    return true;
+  }
+  for (size_t i = 0; i < list_len; i++) {
+    if (!active[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+/* === end of kloak_parsers.inc.h === */
+
+/* === kloak_cli_args.inc.h (inlined; previously a separate header) === */
+/*
+ * Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+ * See the file COPYING for copying conditions.
+ *
+ * AI-Assisted
+ *
+ * Pure CLI argument parser factored out of parse_cli_args() in
+ * kloak.c so fuzz/fuzz_cli_args.c can exercise the getopt_long
+ * dispatch + per-option validation against adversarial argv
+ * without the production exit() calls aborting libFuzzer.
+ *
+ * The pure helper writes its outputs through caller-provided
+ * pointers and returns a status enum; the production wrapper in
+ * kloak.c maps KLOAK_CLI_ARGS_HELP / _ERROR back to exit(0) /
+ * exit(1) (preserving production behaviour exactly) and KLOAK_
+ * CLI_ARGS_OK to applying the parsed values to module-scope
+ * globals. The fuzz harness discards the status.
+ *
+ * Each call must be preceded by 'optind = 0' to fully reset
+ * glibc getopt_long's internal state including the static
+ * 'nextchar' pointer.
+ *
+ * Side effects:
+ *   - parse_uint31_arg / parse_uint32_arg may be called
+ *     (already exit()-free)
+ *   - parse_esc_key_str is NOT called here; instead, when -k
+ *     is given the optarg pointer is returned via
+ *     *esc_key_str_out and the production caller invokes
+ *     parse_esc_key_str on it (kept out of the pure helper so
+ *     the fuzz harness does not have to manage esc_key state
+ *     between iterations).
+ */
+
+
+#include <getopt.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+/*
+ * Requires kloak_parsers.inc.h (parse_uint31_arg, parse_uint32_
+ * arg) to be included before this header so the symbols are in
+ * scope. The production caller already does this; the fuzz
+ * harness does the same.
+ */
+
+enum kloak_cli_args_status {
+  KLOAK_CLI_ARGS_OK    = 0,
+  KLOAK_CLI_ARGS_HELP  = 1,  /* -h / --help was passed */
+  KLOAK_CLI_ARGS_ERROR = 2   /* invalid argument / unknown option */
+};
+
+/*
+ * Parse argv using getopt_long. Every output pointer is
+ * required to be non-NULL. Outputs are only written when the
+ * corresponding option appears; the production caller passes
+ * pointers to the matching module-scope globals which therefore
+ * keep their previous defaults if an option is absent.
+ *
+ * 'esc_key_str_set_out' is set to true and 'esc_key_str_out' is
+ * set to the optarg pointer when -k is seen; production caller
+ * then calls parse_esc_key_str on that pointer. Pointer is into
+ * argv, so the caller must not free argv before consuming it.
+ */
+static __attribute__((unused))
+enum kloak_cli_args_status parse_cli_args_pure(
+  int argc, char **argv,
+  int32_t *max_delay_out,
+  int32_t *startup_delay_out,
+  uint32_t *cursor_color_out,
+  bool *should_draw_cursor_out,
+  bool *enable_natural_scrolling_out,
+  bool *esc_key_str_set_out,
+  const char **esc_key_str_out) {
+  const char *optstring = "d:s:hc:k:n:";
+  static struct option optarr[] = {
+    {"delay", required_argument, NULL, 'd'},
+    {"start-delay", required_argument, NULL, 's'},
+    {"help", no_argument, NULL, 'h'},
+    {"color", required_argument, NULL, 'c'},
+    {"esc-key-combo", required_argument, NULL, 'k'},
+    {"natural-scrolling", required_argument, NULL, 'n'},
+    {0, 0, 0, 0}
+  };
+  int getopt_rslt = 0;
+
+  while (true) {
+    getopt_rslt = getopt_long(argc, argv, optstring, optarr, NULL);
+    if (getopt_rslt == -1) {
+      break;
+    } else if (getopt_rslt == '?') {
+      return KLOAK_CLI_ARGS_ERROR;
+    } else if (getopt_rslt == 'd') {
+      if (!parse_uint31_arg(optarg, 10, max_delay_out)) {
+        return KLOAK_CLI_ARGS_ERROR;
+      }
+    } else if (getopt_rslt == 's') {
+      if (!parse_uint31_arg(optarg, 10, startup_delay_out)) {
+        return KLOAK_CLI_ARGS_ERROR;
+      }
+    } else if (getopt_rslt == 'c') {
+      if (!parse_uint32_arg(optarg, 16, cursor_color_out)) {
+        return KLOAK_CLI_ARGS_ERROR;
+      }
+      if ((*cursor_color_out >> 24) == 0) {
+        /* Cursor is entirely transparent, disable drawing it
+         * to save resources. */
+        *should_draw_cursor_out = false;
+      }
+    } else if (getopt_rslt == 'n') {
+      if (strcmp(optarg, "true") == 0) {
+        *enable_natural_scrolling_out = true;
+      } else {
+        *enable_natural_scrolling_out = false;
+      }
+    } else if (getopt_rslt == 'k') {
+      *esc_key_str_set_out = true;
+      *esc_key_str_out = optarg;
+    } else if (getopt_rslt == 'h') {
+      return KLOAK_CLI_ARGS_HELP;
+    } else {
+      return KLOAK_CLI_ARGS_ERROR;
+    }
+  }
+  return KLOAK_CLI_ARGS_OK;
+}
+/* === end of kloak_cli_args.inc.h === */
+
+/*
+ * Everything below this point is production code - wayland /
+ * libinput dispatch, the event-queue TAILQ, the disp_state
+ * globals, the wayland callbacks, main(). It is compiled only
+ * when KLOAK_FUZZ is undefined (i.e. when building the kloak
+ * binary, not when a fuzz harness includes this file). The
+ * matching #endif sits at the bottom of the file.
+ */
+#ifndef KLOAK_FUZZ
+
+/********************/
+/* global variables */
+/********************/
+
+static double cursor_x = 0.0;
+static double cursor_y = 0.0;
+static double prev_cursor_x = 0.0;
+static double prev_cursor_y = 0.0;
+static double vert_scroll_accum = 0.0;
+static double horiz_scroll_accum = 0.0;
+
+static struct disp_state state = { 0 };
+static struct libinput *li = NULL;
+static int inotify_fd = 0;
+
+static struct pollfd *ev_fds = NULL;
+
+static int64_t prev_release_time = 0;
+static TAILQ_HEAD(tailhead_evq, input_packet) evq_head;
+
+static int32_t max_delay = DEFAULT_MAX_DELAY_MS;
+static int32_t startup_delay = DEFAULT_STARTUP_TIMEOUT_MS;
+static uint32_t cursor_color = 0x00000000;
+static bool should_draw_cursor = true;
+static bool enable_natural_scrolling = false;
+
+
+static LIST_HEAD(listhead_ldi, li_device_info) ldi_head;
+
+static const char *default_esc_key_str
+  = "KEY_RIGHTSHIFT,KEY_ESC";
+
+static int64_t start_time = 0;
+
+static int randfd = 0;
+
+static bool did_wayland_init = false;
+static bool exit_on_wl_connect_failure = false;
+
+
+/*********************/
+/* utility functions */
+/*********************/
+
+static void *safe_calloc(size_t nmemb, size_t size) {
+  void *out_ptr = calloc(nmemb, size);
   if (out_ptr == NULL) {
     fprintf(stderr,
       "FATAL ERROR: Could not allocate memory: %s\n", strerror(errno));
@@ -293,6 +2070,9 @@ static char *safe_strdup(const char *s) {
   }
   return out_ptr;
 }
+
+/* safe_strdup() / safe_reallocarray() moved up to the parsers
+ * section (parse_esc_key_str needs them and is a pure helper). */
 
 static int safe_open(const char *pathname, int flags) {
   int out_int = open(pathname, flags);
@@ -512,438 +2292,49 @@ static int64_t random_between(int64_t lower, int64_t upper) {
   return lower + randval.val;
 }
 
-static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
-  int32_t rect_y, int32_t rect_width, int32_t rect_height) {
-  if (x < 0 || y < 0 || rect_x < 0 || rect_y < 0 || rect_width < 0
-    || rect_height < 0) {
-    return false;
-  }
-  if (x >= rect_x && x < rect_x + rect_width
-    && y >= rect_y && y < rect_y + rect_height) {
-    return true;
-  }
-  return false;
-}
 
-static bool check_screen_touch(struct output_geometry scr1,
-  struct output_geometry scr2) {
-  /*
-   * We check for both touching and overlapping screens. Screens are
-   * overlapping if any of one screen's corner points falls inside the area of
-   * the other screen. The criteria to establish touching screens is a bit
-   * tricky, but a shortcut we can take is to simply grow the size of one of
-   * the screens by one pixel in every direction (i.e., subtract one from both
-   * the X and Y position coordinates and then add two to the width and
-   * height). Then any form of screen touching will be seen as an overlap,
-   * including touching at the corners.
-   */
-
-  if (scr1.x < 0 || scr1.y < 0 || scr1.width < 0 || scr1.height < 0
-    || scr2.x < 0 || scr2.y < 0 || scr2.width < 0 || scr2.height < 0) {
-    return false;
-  }
-
-  if (scr1.x > 0) {
-    scr1.x -= 1;
-    scr1.width += 2;
-  } else {
-    scr1.width += 1;
-  }
-  if (scr1.y > 0) {
-    scr1.y -= 1;
-    scr1.height += 2;
-  } else {
-    scr1.height += 1;
-  }
-
-  if (check_point_in_area(scr1.x, scr1.y, scr2.x, scr2.y, scr2.width,
-    scr2.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr1.x + scr1.width, scr1.y, scr2.x, scr2.y,
-    scr2.width, scr2.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr1.x, scr1.y + scr1.height, scr2.x, scr2.y,
-    scr2.width, scr2.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr1.x + scr1.width, scr1.y + scr1.height, scr2.x,
-    scr2.y, scr2.width, scr2.height)) {
-    return true;
-  }
-  /*
-   * It's possible for none of screen 1's corners to be inside screen 2, but
-   * for some of screen 2's corners to be inside screen 1, i.e. in this
-   * configuration:
-   *
-   * +------------------+
-   * |                  |
-   * |               +------------------+
-   * |     Screen 1  |  |  Screen 2     |
-   * |               +------------------+
-   * |                  |
-   * +------------------+
-   *
-   * Therefore we need to repeat the above checks to see if screen 2 has a
-   * corner within screen 1. We do NOT need to grow screen 2 by one pixel in
-   * all directions like we did with screen 1; the growing of screen 1 is
-   * enough to allow touch detection, we just need to actually detect it.
-   */
-  if (check_point_in_area(scr2.x, scr2.y, scr1.x, scr1.y, scr1.width,
-    scr1.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr2.x + scr2.width, scr2.y, scr1.x, scr1.y,
-    scr1.width, scr1.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr2.x, scr2.y + scr2.height, scr1.x, scr1.y,
-    scr1.width, scr1.height)) {
-    return true;
-  }
-  if (check_point_in_area(scr2.x + scr2.width, scr2.y + scr2.height, scr1.x,
-    scr1.y, scr1.width, scr1.height)) {
-    return true;
-  }
-  return false;
-}
-
+/* recalc_global_space()'s body moved to src/kloak_recalc.inc.h
+ * as recalc_global_space_pure(); this wrapper does the same
+ * thing on the disp_state global. The gap-detection panic stays
+ * here (the pure helper returns KLOAK_RECALC_GAP instead so it
+ * is callable from the fuzz harness). */
 static void recalc_global_space(struct disp_state *param_state) {
-  int32_t ul_corner_x = INT32_MAX;
-  int32_t ul_corner_y = INT32_MAX;
-  int32_t br_corner_x = 0;
-  int32_t br_corner_y = 0;
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  int32_t temp_br_x = 0;
-  int32_t temp_br_y = 0;
-  struct output_geometry *screen_list[MAX_SCREEN_COUNT];
-  ssize_t screen_list_len = 0;
-  struct output_geometry *conn_screen_list[MAX_SCREEN_COUNT];
-  ssize_t conn_screen_list_len = 0;
-  bool screen_in_conn_list = false;
-  struct output_geometry *conn_screen = NULL;
-  struct output_geometry *cur_screen = NULL;
-
-  for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (!param_state->output_geometries[i]) {
-      continue;
-    }
-    cur_geom_x = param_state->output_geometries[i]->x;
-    cur_geom_y = param_state->output_geometries[i]->y;
-    cur_geom_width = param_state->output_geometries[i]->width;
-    cur_geom_height = param_state->output_geometries[i]->height;
-    if (cur_geom_x < 0 || cur_geom_y < 0
-      || cur_geom_width < 0 || cur_geom_height < 0) {
-      continue;
-    }
-    screen_list[screen_list_len] = param_state->output_geometries[i];
-    screen_list_len++;
-    if (cur_geom_x < ul_corner_x) {
-      ul_corner_x = cur_geom_x;
-    }
-    if (cur_geom_y < ul_corner_y) {
-      ul_corner_y = cur_geom_y;
-    }
-    temp_br_x = cur_geom_x + cur_geom_width;
-    temp_br_y = cur_geom_y + cur_geom_height;
-    if (temp_br_x > br_corner_x) {
-      br_corner_x = temp_br_x;
-    }
-    if (temp_br_y > br_corner_y) {
-      br_corner_y = temp_br_y;
-    }
+  struct kloak_recalc_result r = recalc_global_space_pure(
+    param_state->output_geometries, MAX_SCREEN_COUNT);
+  switch (r.status) {
+    case KLOAK_RECALC_INCOMPLETE:
+      /* Silently fail if we haven't gotten a valid state yet */
+      return;
+    case KLOAK_RECALC_GAP:
+      fprintf(stderr,
+        "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
+      exit(1);
+    case KLOAK_RECALC_OK:
+      param_state->global_space_width = r.global_space_width;
+      param_state->global_space_height = r.global_space_height;
+      param_state->pointer_space_x = r.pointer_space_x;
+      param_state->pointer_space_y = r.pointer_space_y;
+      return;
+    default:
+      /* Unreachable; the pure helper only returns the three
+       * statuses above. The default case exists to satisfy
+       * -Wswitch-default. */
+      return;
   }
-
-  /* Silently fail if we haven't gotten a valid state yet */
-  if (screen_list_len <= 0) {
-    return;
-  }
-  if (ul_corner_x > br_corner_x) {
-    return;
-  }
-  if (ul_corner_y > br_corner_y) {
-    return;
-  }
-
-  conn_screen_list[0] = screen_list[0];
-  conn_screen_list_len = 1;
-
-  /*
-   * Check for gaps between the screens. We don't support running if gaps are
-   * present. To do this, we start with an arbitrary screen, then find all
-   * screens touching it, then find all screens touching those screens, and so
-   * on, until we can't find any more screens touching whatever "zone" we
-   * started in. If the number of connected screens is equal to the number of
-   * attached screens, then all screens are connected, otherwise there is a
-   * gap somewhere.
-   */
-  for (ssize_t i = 0; i < conn_screen_list_len; i++) {
-    for (ssize_t j = 0; j < screen_list_len; j++) {
-      screen_in_conn_list = false;
-      for (ssize_t k = 0; k < conn_screen_list_len; k++) {
-        if (screen_list[j] == conn_screen_list[k]) {
-          screen_in_conn_list = true;
-          break;
-        }
-      }
-      if (screen_in_conn_list) {
-        continue;
-      }
-      conn_screen = conn_screen_list[i];
-      cur_screen = screen_list[j];
-      if (check_screen_touch(*conn_screen, *cur_screen)) {
-        /* Found a touching screen! */
-        conn_screen_list[conn_screen_list_len] = cur_screen;
-        conn_screen_list_len++;
-      }
-    }
-  }
-
-  if (conn_screen_list_len != screen_list_len) {
-    fprintf(stderr,
-      "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
-    exit(1);
-  }
-
-  param_state->global_space_width = br_corner_x;
-  param_state->global_space_height = br_corner_y;
-  param_state->pointer_space_x = ul_corner_x;
-  param_state->pointer_space_y = ul_corner_y;
 }
 
 static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
   int32_t y) {
-  struct screen_local_coord out_data = { 0 };
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  int32_t i = 0;
-
-  if (x < 0 || y < 0) {
-    return out_data;
-  }
-
-  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (!state.output_geometries[i]) {
-      continue;
-    }
-
-    cur_geom_x = state.output_geometries[i]->x;
-    cur_geom_y = state.output_geometries[i]->y;
-    cur_geom_width = state.output_geometries[i]->width;
-    cur_geom_height = state.output_geometries[i]->height;
-    if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
-      || cur_geom_height < 0 ) {
-      continue;
-    }
-
-    if (!(x >= cur_geom_x)) {
-      continue;
-    }
-    if (!(y >= cur_geom_y)) {
-      continue;
-    }
-    if (!(x < cur_geom_x + cur_geom_width)) {
-      continue;
-    }
-    if (!(y < cur_geom_y + cur_geom_height)) {
-      continue;
-    }
-    out_data.output_idx = i;
-    out_data.x = x - cur_geom_x;
-    out_data.y = y - cur_geom_y;
-    out_data.valid = true;
-    break;
-  }
-
-  /* There is a possibility that out_data will contain all zeros; if this
-   * happens, it means that no output covered the requested coordinates in the
-   * compositor's global space. That's a valid thing to tell a caller, so just
-   * return it anyway. */
-  return out_data;
+  return coord_abs_to_local_pure(x, y, state.output_geometries,
+    MAX_SCREEN_COUNT);
 }
 
 static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
   int32_t output_idx) {
-  int32_t cur_geom_x = 0;
-  int32_t cur_geom_y = 0;
-  int32_t cur_geom_width = 0;
-  int32_t cur_geom_height = 0;
-  struct coord out_val = {
-    .x = -1,
-    .y = -1,
-  };
-
   assert(output_idx >= 0);
   assert(output_idx < MAX_SCREEN_COUNT);
-  if (x < 0 || y < 0) {
-    return out_val;
-  }
-
-  if (!state.output_geometries[output_idx]) {
-    return out_val;
-  }
-  cur_geom_x = state.output_geometries[output_idx]->x;
-  cur_geom_y = state.output_geometries[output_idx]->y;
-  cur_geom_width = state.output_geometries[output_idx]->width;
-  cur_geom_height = state.output_geometries[output_idx]->height;
-  if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
-    || cur_geom_height < 0) {
-    return out_val;
-  }
-
-  out_val.x = cur_geom_x + x;
-  out_val.y = cur_geom_y + y;
-  return out_val;
+  return coord_local_to_abs_pure(x, y, state.output_geometries[output_idx]);
 }
-
-struct coord traverse_line(struct coord start, struct coord end,
-  int32_t pos) {
-  struct coord out_val = { 0 };
-  double num = 0.0;
-  double denom = 0.0;
-  double slope = 0.0;
-  double steep = 0.0;
-
-  num = ((double) end.y) - ((double) start.y);
-  denom = ((double) start.x) - ((double) end.x);
-
-  if (pos == 0) return start;
-
-  if ((int64_t)(denom) == 0) {
-    /* vertical line */
-    out_val.x = start.x;
-    if (start.y < end.y) {
-      out_val.y = start.y + pos;
-    } else {
-      out_val.y = start.y - pos;
-    }
-    return out_val;
-  }
-
-  slope = num / denom;
-  steep = fabs(slope);
-
-  if (steep < 1) {
-    if (start.x < end.x) {
-      out_val.x = start.x + pos;
-    } else {
-      out_val.x = start.x - pos;
-    }
-    if (start.y < end.y) {
-      out_val.y = start.y + (int32_t)((double) pos * steep);
-    } else {
-      out_val.y = start.y - (int32_t)((double) pos * steep);
-    }
-  } else {
-    if (start.y < end.y) {
-      out_val.y = start.y + pos;
-    } else {
-      out_val.y = start.y - pos;
-    }
-    if (start.x < end.x) {
-      out_val.x = start.x + (int32_t)((double) pos * (1 / steep));
-    } else {
-      out_val.x = start.x - (int32_t)((double) pos * (1 / steep));
-    }
-  }
-
-  return out_val;
-}
-
-static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
-  int32_t layer_width, int32_t layer_height, int32_t rad, bool crosshair) {
-  int32_t start_x = 0;
-  int32_t start_y = 0;
-  int32_t end_x = 0;
-  int32_t end_y = 0;
-  int32_t work_x = 0;
-  int32_t work_y = 0;
-
-  assert(should_draw_cursor);
-
-  start_x = x - rad;
-  if (start_x < 0) start_x = 0;
-  start_y = y - rad;
-  if (start_y < 0) start_y = 0;
-  end_x = x + rad;
-  if (end_x >= layer_width) end_x = layer_width - 1;
-  end_y = y + rad;
-  if (end_y >= layer_height) end_y = layer_height - 1;
-
-  for (work_y = start_y; work_y <= end_y; work_y++) {
-    for (work_x = start_x; work_x <= end_x; work_x++) {
-      if (crosshair && work_x == x) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
-      } else if (crosshair && work_y == y) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
-      } else {
-        pixbuf[offset + (work_y * layer_width + work_x)] = 0x00000000;
-      }
-    }
-  }
-}
-
-/*
- * Both this and parse_uint32_arg make it the caller's responsibility to
- * terminate the application if the parse fails. This it to make it easier to
- * fuzz kloak.
- */
-static bool parse_uint31_arg(const char *val, int base, int32_t *out) {
-  char *val_endchar = NULL;
-  uint64_t val_int = 0;
-
-  if (val == NULL || out == NULL) {
-    return false;
-  }
-  if (*val == '\0') {
-    return false;
-  }
-  errno = 0;
-  val_int = strtoul(val, &val_endchar, base);
-  if (errno == ERANGE) {
-    return false;
-  }
-  if (*val_endchar != '\0') {
-    return false;
-  }
-  if (val_int > INT32_MAX) {
-    return false;
-  }
-  *out = (int32_t)(val_int);
-  return true;
-}
-
-static bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
-  char *val_endchar = NULL;
-  uint64_t val_int = 0;
-
-  if (val == NULL || out == NULL) {
-    return false;
-  }
-  if (*val == '\0') {
-    return false;
-  }
-  errno = 0;
-  val_int = strtoul(val, &val_endchar, base);
-  if (errno == ERANGE) {
-    return false;
-  }
-  if (*val_endchar != '\0') {
-    return false;
-  }
-  if (val_int > UINT32_MAX) {
-    return false;
-  }
-  *out = (uint32_t)(val_int);
-  return true;
-}
-
 static int32_t sleep_ms(int64_t ms) {
   struct timespec ts = { 0 };
   int nanosleep_ret = 0;
@@ -985,16 +2376,6 @@ static char *sgenprintf(const char *str, ...) {
   return rslt;
 }
 
-static uint32_t lookup_keycode(const char *name) {
-  struct key_name_value *p = NULL;
-
-  for (p = key_table; p->name != NULL; p++) {
-    if (strcmp(p->name, name) == 0) {
-      return p->value;
-    }
-  }
-  return 0;
-}
 
 static void attach_input_device(const char *dev_name) {
   bool found_device = false;
@@ -1076,29 +2457,21 @@ static void detach_input_device(const char *dev_name) {
   libinput_path_remove_device(dev);
 }
 
+/* get_ticks_from_scroll_accum()'s math moved to src/kloak_scroll_
+ * ticks.inc.h as get_ticks_from_scroll_accum_pure(); this wrapper
+ * keeps the assert() preconditions in place (production wants to
+ * abort on impossible-in-prod inputs; the pure helper returns
+ * valid=false instead so the fuzz harness can drive adversarial
+ * doubles). */
 static int32_t get_ticks_from_scroll_accum(double *accum_ptr) {
-  double scroll_accum = *accum_ptr;
-  double scroll_ticks_d = 0.0;
-  int32_t scroll_ticks = 0;
-
-  if (fpclassify(scroll_accum) != FP_ZERO) {
-    assert(isfinite(scroll_accum));
-    scroll_ticks_d = scroll_accum / SCROLL_UNITS_PER_TICK_D;
-    /* We intentionally use SCROLL_UNITS_PER_TICK here, not
-     * SCROLL_UNITS_PER_TICK_D. The extra fraction of a scroll tick we would
-     * gain from using SCROLL_UNITS_PER_TICK_D is not worthwhile, and having
-     * the enforced threshold slightly lower than the real threshold is
-     * arguably safer. */
-    assert(scroll_ticks_d <= (INT32_MAX / SCROLL_UNITS_PER_TICK));
-    assert(scroll_ticks_d >= (INT32_MIN / SCROLL_UNITS_PER_TICK));
-    scroll_ticks = (int32_t)(scroll_ticks_d);
-    if (scroll_ticks != 0) {
-      scroll_accum += -(scroll_ticks * SCROLL_UNITS_PER_TICK);
-      *accum_ptr = scroll_accum;
-    }
+  struct kloak_scroll_ticks_result r;
+  assert(isfinite(*accum_ptr));
+  r = get_ticks_from_scroll_accum_pure(*accum_ptr);
+  assert(r.valid);
+  if (r.ticks != 0) {
+    *accum_ptr = r.new_accum;
   }
-
-  return scroll_ticks;
+  return r.ticks;
 }
 
 static void wl_display_flush_safe(struct wl_display *display) {
@@ -1288,11 +2661,19 @@ static void kb_handle_keymap(void *data,
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
 
-  if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
-    fprintf(stderr,
-      "WARNING: Unsupported raw keymap was provided by server, ignoring.\n");
-    safe_close(fd);
-    return;
+  /* Format check moved to check_keymap_buf_pure() in
+   * kloak_keymap_check.inc.h alongside the NUL-terminator
+   * check below; this branch handles the no-mmap-yet case
+   * where the buffer pointer is not available. */
+  {
+    struct kloak_keymap_check_result pre_check =
+      check_keymap_buf_pure(format, NULL, 0);
+    if (!pre_check.format_supported) {
+      fprintf(stderr,
+        "WARNING: Unsupported raw keymap was provided by server, ignoring.\n");
+      safe_close(fd);
+      return;
+    }
   }
 
   assert(size <= INT32_MAX);
@@ -1303,11 +2684,16 @@ static void kb_handle_keymap(void *data,
     exit(1);
   }
 
-  /* XKB v1 keymaps are NULL-terminated strings. */
-  if (memchr(kb_map_shm, '\0', size) == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator!\n");
-    exit(1);
+  /* XKB v1 keymaps are NUL-terminated strings; the pure
+   * validator runs memchr over the mapped region to confirm. */
+  {
+    struct kloak_keymap_check_result buf_check =
+      check_keymap_buf_pure(format, kb_map_shm, size);
+    if (!buf_check.null_terminated) {
+      fprintf(stderr,
+        "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator!\n");
+      exit(1);
+    }
   }
 
   if (param_state->old_kb_map_shm) {
@@ -1407,7 +2793,8 @@ static void wl_buffer_release(__attribute__((unused)) void *data,
           state.layers[i]->width,
           state.layers[i]->height,
           CURSOR_RADIUS,
-          false
+          false,
+          cursor_color
         );
         break;
       }
@@ -1526,6 +2913,7 @@ static void layer_surface_configure(void *data,
   ssize_t i = 0;
   int shm_fd = 0;
   struct wl_region *zeroed_region = NULL;
+  struct kloak_layer_dims dims = { 0 };
 
   assert(should_draw_cursor);
 
@@ -1538,14 +2926,25 @@ static void layer_surface_configure(void *data,
     }
   }
   assert(layer != NULL);
-  assert(width <= INT32_MAX / 4);
-  assert(height <= INT32_MAX);
-  layer->width = (int32_t)(width);
-  layer->height = (int32_t)(height);
-  layer->stride = (int32_t)(width * 4);
-  layer->size = layer->stride * layer->height;
-  assert(layer->size >= 0);
-  assert(layer->size <= INT32_MAX / MAX_UNRELEASED_FRAMES);
+  /* Validate width/height + derive stride / size in int64_t.
+   * The previous inline arithmetic computed 'stride * height' in
+   * int32_t and only then asserted the bounds; under -ftrapv
+   * the multiplication would trap before the assertion could
+   * fire. compute_layer_dims_pure() does every step in int64_t
+   * and rejects on overflow. Production callers see real
+   * compositor dimensions and never hit the rejection path; a
+   * hostile compositor would. */
+  dims = compute_layer_dims_pure(width, height);
+  if (!dims.valid) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor reported layer dimensions kloak cannot represent (%ux%u).\n",
+      width, height);
+    exit(1);
+  }
+  layer->width  = dims.width;
+  layer->height = dims.height;
+  layer->stride = dims.stride;
+  layer->size   = dims.size;
   shm_fd = create_shm_file(layer->size * MAX_UNRELEASED_FRAMES);
   if (shm_fd == -1) {
     fprintf(stderr,
@@ -1662,7 +3061,7 @@ static void draw_frame(struct drawable_layer *layer) {
     /* Draw crosshairs at the pointer location */
     draw_block(layer->pixbuf, (layer->size * chosen_frame_idx) / 4,
       scr_coord.x, scr_coord.y, layer->width, layer->height, CURSOR_RADIUS,
-      true);
+      true, cursor_color);
     damage_surface_enh(layer->surface, scr_coord.x - CURSOR_RADIUS,
       scr_coord.y - CURSOR_RADIUS, scr_coord.x + CURSOR_RADIUS + 1,
       scr_coord.y + CURSOR_RADIUS + 1);
@@ -1739,11 +3138,7 @@ static struct input_packet * update_virtual_cursor(void) {
   int32_t i = 0;
   struct coord start = { 0 };
   struct coord end = { 0 };
-  struct coord prev_trav_coord = { 0 };
-  bool end_x_hit = false;
-  bool end_y_hit = false;
-  struct coord trav_coord = { 0 };
-  struct screen_local_coord trav_scr_coord = { 0 };
+  struct kloak_walk_cursor_result walk_result = { 0 };
   struct screen_local_coord scr_coord = { 0 };
   struct input_packet *old_ev_packet = NULL;
   struct input_packet *ev_packet = NULL;
@@ -1811,84 +3206,20 @@ static struct input_packet * update_virtual_cursor(void) {
   start.y = (int32_t)(prev_cursor_y);
   end.x = (int32_t)(cursor_x);
   end.y = (int32_t)(cursor_y);
-  prev_trav_coord = start;
-  for (i = 0; ; i++) {
-    trav_coord = traverse_line(start, end, i);
-    if (trav_coord.x == end.x) end_x_hit = true;
-    if (trav_coord.y == end.y) end_y_hit = true;
-    trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-      trav_coord.y);
-    if (!trav_scr_coord.valid) {
-      /*
-       * Figure out what direction we moved when we went off screen, and move
-       * move backwards in that direction, but in only one dimension.
-       */
-      if (prev_trav_coord.x < trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x - 1,
-          trav_coord.y);
-        if (trav_scr_coord.valid) {
-          start.x = trav_coord.x - 1;
-          start.y = trav_coord.y;
-          end.x = trav_coord.x - 1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.x > trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x + 1,
-          trav_coord.y);
-        if (trav_scr_coord.valid) {
-          start.x = trav_coord.x + 1;
-          start.y = trav_coord.y;
-          end.x = trav_coord.x + 1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.y < trav_coord.y) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y - 1);
-        if (trav_scr_coord.valid) {
-          start.y = trav_coord.y - 1;
-          start.x = trav_coord.x;
-          end.y = trav_coord.y -1;
-          i = -1;
-          continue;
-        }
-      }
-      if (prev_trav_coord.y > trav_coord.y) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y + 1);
-        if (trav_scr_coord.valid) {
-          start.y = trav_coord.y + 1;
-          start.x = trav_coord.x;
-          end.y = trav_coord.y + 1;
-          i = -1;
-          continue;
-        }
-      }
-      /*
-       * If all of the above fail, we've gone diagonally off a screen and into
-       * compositor global space. Move the cursor back to where it was and
-       * stop it.
-       */
-      start.x = prev_trav_coord.x;
-      start.y = prev_trav_coord.y;
-      end.x = prev_trav_coord.x;
-      end.y = prev_trav_coord.y;
-      i = -1;
-      continue;
-    }
-    if (end_x_hit && end_y_hit) {
-      if ((int32_t)(cursor_x) != end.x) {
-        cursor_x = end.x;
-      }
-      if ((int32_t)(cursor_y) != end.y) {
-        cursor_y = end.y;
-      }
-      break;
-    }
-    prev_trav_coord = trav_coord;
+  /* The glide-along-wall loop body lives in kloak_walk_cursor.
+   * inc.h; the pure helper takes the geometries by parameter
+   * and returns the final cursor position so the fuzz harness
+   * can exercise it without the disp_state global. Production
+   * passes INT32_MAX for max_iterations because the walk is
+   * bounded by manhattan distance between start and end
+   * (already int32). */
+  walk_result = walk_cursor_pure(start, end, state.output_geometries,
+    MAX_SCREEN_COUNT, INT32_MAX);
+  if ((int32_t)(cursor_x) != walk_result.final_pos.x) {
+    cursor_x = walk_result.final_pos.x;
+  }
+  if ((int32_t)(cursor_y) != walk_result.final_pos.y) {
+    cursor_y = walk_result.final_pos.y;
   }
   assert(cursor_x < INT32_MAX && cursor_x >= 0);
   assert(cursor_y < INT32_MAX && cursor_y >= 0);
@@ -2070,9 +3401,6 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
   uint32_t key = 0;
   enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
   enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
-  size_t i = 0;
-  size_t j = 0;
-  bool hit_exit = true;
 
   if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
     return;
@@ -2082,29 +3410,9 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
   key = libinput_event_keyboard_get_key(kb_event);
   key_state = libinput_event_keyboard_get_key_state(kb_event);
 
-  for (i = 0; i < esc_key_list_len; i++) {
-    for (j = 0; j < esc_key_sublist_len[i]; j++) {
-      if (esc_key_list[i][j] != key) {
-        continue;
-      }
-
-      if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
-        active_esc_key_list[i] = true;
-      } else {
-        active_esc_key_list[i] = false;
-      }
-      break;
-    }
-  }
-
-  for (i = 0; i < esc_key_list_len; i++) {
-    if (!active_esc_key_list[i]) {
-      hit_exit = false;
-      break;
-    }
-  }
-
-  if (hit_exit) {
+  if (esc_combo_update(key, key_state == LIBINPUT_KEY_STATE_PRESSED,
+        esc_key_list, esc_key_sublist_len, esc_key_list_len,
+        active_esc_key_list)) {
     exit(0);
   }
 }
@@ -2400,12 +3708,29 @@ static void release_scheduled_input_events(void) {
   }
 }
 
+static void dispatch_inotify_event(const struct inotify_event *ie) {
+  /* Per inotify(7) the 'name' field is optional: when present it
+   * is always NUL-terminated (and NUL-padded out to 'len'), so
+   * strncmp would honour the terminator. When ie->len == 0 the
+   * name is absent entirely and ie->name aliases whatever bytes
+   * follow this record - that is the actual out-of-bounds read
+   * to guard against. (Corrected after review feedback that the
+   * original 'ie->len < 6' guard overshot the real bug class.) */
+  if (ie->len == 0) {
+    return;
+  }
+  if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
+    if (ie->mask & IN_CREATE) {
+      attach_input_device(ie->name);
+    } else {
+      detach_input_device(ie->name);
+    }
+  }
+}
+
 static void handle_inotify_events(void) {
   static char *read_buf = NULL;
   ssize_t read_len = 0;
-  ssize_t rem_len = 0;
-  ssize_t struct_len = 0;
-  struct inotify_event *ie;
 
   if (read_buf == NULL) {
     read_buf = safe_calloc(INOTIFY_READ_BUF_LEN, sizeof(char));
@@ -2425,108 +3750,21 @@ static void handle_inotify_events(void) {
     break;
   }
 
-  ie = (void *)(read_buf);
-  rem_len = read_len;
-  while (true) {
-    assert(rem_len >= (ssize_t)(sizeof(struct inotify_event)));
-    assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
-    struct_len = ((ssize_t)(sizeof(struct inotify_event)) + (ssize_t)(ie->len));
-    assert(struct_len <= rem_len);
-    rem_len -= struct_len;
-    assert(rem_len >= 0);
-
-    if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
-      if (ie->mask & IN_CREATE) {
-        attach_input_device(ie->name);
-      } else {
-        detach_input_device(ie->name);
-      }
-    }
-
-    if (rem_len <= 0) {
-      break;
-    }
-
-    /*
-     * We can safely disable cast alignment checks here because the kernel
-     * should only provide us properly aligned events. Quoting the manpage:
-     *
-     *     ...This filename is null-terminated, and may include further null
-     *     bytes ('\0') to align subsequent reads to a suitable address
-     *     boundary.
-     */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-align"
-    ie = (struct inotify_event *)((char *)(ie) + struct_len);
-#pragma GCC diagnostic pop
-  }
+  parse_inotify_buffer(read_buf, read_len, dispatch_inotify_event);
 }
 
-static void parse_esc_key_str(const char *esc_key_str) {
-  char *esc_key_str_copy = safe_strdup(esc_key_str);
-  char *orig_key_str_copy = esc_key_str_copy;
-  char *root_token = NULL;
-  const char *sub_token = NULL;
-  size_t i = 0;
-  size_t j = 0;
 
-  for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
-    if (root_token[0] == '\0' ) {
-      fprintf(stderr,
-        "FATAL ERROR: Empty key name specified in escape key list!\n");
-      exit(1);
-    }
-
-    esc_key_list_len++;
-    esc_key_list = safe_reallocarray(esc_key_list, esc_key_list_len,
-      sizeof(uint32_t *));
-    esc_key_sublist_len = safe_reallocarray(esc_key_sublist_len,
-      esc_key_list_len, sizeof(size_t));
-    active_esc_key_list = safe_reallocarray(active_esc_key_list,
-      esc_key_list_len, sizeof(bool));
-    esc_key_list[i] = NULL;
-    esc_key_sublist_len[i] = 0;
-    active_esc_key_list[i] = false;
-
-    for (j = 0; ((sub_token = strsep(&root_token, "|")) != NULL); j++)  {
-      if (sub_token[0] == '\0') {
-        fprintf(stderr,
-          "FATAL ERROR: Empty key name specified in escape key list!\n");
-        exit(1);
-      }
-
-      esc_key_sublist_len[i]++;
-      esc_key_list[i] = safe_reallocarray(esc_key_list[i],
-        esc_key_sublist_len[i], sizeof(uint32_t));
-      esc_key_list[i][j] = lookup_keycode(sub_token);
-      if (esc_key_list[i][j] == 0) {
-        fprintf(stderr, "FATAL ERROR: Unrecognized Key name '%s'!\n",
-          sub_token);
-        exit(1);
-      }
-    }
-  }
-
-  free(orig_key_str_copy);
-}
-
+/* calc_poll_timeout()'s saturating int64 subtraction moved to
+ * src/kloak_poll_timeout.inc.h as kloak_poll_timeout_pure();
+ * this wrapper pulls the queue head and current time. */
 static int calc_poll_timeout(void) {
   const struct input_packet *packet = NULL;
-  int64_t timeout_duration = 0;
 
   packet = TAILQ_FIRST(&evq_head);
   if (packet == NULL) {
     return -1;
   }
-
-  timeout_duration = packet->sched_time - current_time_ms();
-  if (timeout_duration < 0) {
-    return 0;
-  }
-  if (timeout_duration > INT_MAX) {
-    return INT_MAX;
-  }
-  return (int)(timeout_duration);
+  return kloak_poll_timeout_pure(packet->sched_time, current_time_ms());
 }
 
 static void print_usage(void) {
@@ -2750,73 +3988,39 @@ static void applayer_poll_init(void) {
   }
 }
 
+/* The getopt dispatch + per-option validation moved to
+ * src/kloak_cli_args.inc.h as parse_cli_args_pure(); this
+ * wrapper applies the parsed values to module-scope globals,
+ * print_usage()/exit()s on help-or-error, and dispatches
+ * parse_esc_key_str() for the -k optarg (which the pure helper
+ * intentionally does not invoke - kept out so the fuzz harness
+ * does not have to manage esc_key state between iterations). */
 static void parse_cli_args(int argc, char **argv) {
-  const char *optstring = "d:s:hc:k:n:";
-  static struct option optarr[] = {
-    {"delay", required_argument, NULL, 'd'},
-    {"start-delay", required_argument, NULL, 's'},
-    {"help", no_argument, NULL, 'h'},
-    {"color", required_argument, NULL, 'c'},
-    {"esc-key-combo", required_argument, NULL, 'k'},
-    {"natural-scrolling", required_argument, NULL, 'n'},
-    {0, 0, 0, 0}
-  };
-  int getopt_rslt = 0;
+  bool esc_key_str_set = false;
+  const char *esc_key_str = NULL;
+  enum kloak_cli_args_status rc = KLOAK_CLI_ARGS_OK;
 
-  while(true) {
-    getopt_rslt = getopt_long(argc, argv, optstring, optarr, NULL);
-    if (getopt_rslt == -1) {
-      break;
-    } else if (getopt_rslt == '?') {
-      print_usage();
-      exit(1);
-    } else if (getopt_rslt == 'd') {
-      if (!parse_uint31_arg(optarg, 10, &max_delay)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'delay'!",
-          optarg);
-        exit(1);
-      }
-    } else if (getopt_rslt == 's') {
-      if (!parse_uint31_arg(optarg, 10, &startup_delay)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'start-delay'!",
-          optarg);
-        exit(1);
-      }
-    } else if (getopt_rslt == 'c') {
-      if (!parse_uint32_arg(optarg, 16, &cursor_color)) {
-        fprintf(stderr,
-          "FATAL ERROR: Invalid value '%s' passed to parameter 'color'!",
-          optarg);
-        exit(1);
-      }
-      if ((cursor_color >> 24) == 0) {
-        /*
-         * Cursor is entirely transparent, disable drawing it to save
-         * resources
-         */
-        should_draw_cursor = false;
-      }
-    } else if (getopt_rslt == 'n') {
-      if (strcmp(optarg, "true") == 0) {
-        enable_natural_scrolling = true;
-      } else {
-        enable_natural_scrolling = false;
-      }
-    } else if (getopt_rslt == 'k') {
-      parse_esc_key_str(optarg);
-    } else if (getopt_rslt == 'h') {
-      print_usage();
-      exit(0);
-    } else {
-      print_usage();
+  rc = parse_cli_args_pure(argc, argv,
+    &max_delay, &startup_delay, &cursor_color,
+    &should_draw_cursor, &enable_natural_scrolling,
+    &esc_key_str_set, &esc_key_str);
+  if (rc == KLOAK_CLI_ARGS_HELP) {
+    print_usage();
+    exit(0);
+  }
+  if (rc == KLOAK_CLI_ARGS_ERROR) {
+    print_usage();
+    exit(1);
+  }
+  if (esc_key_str_set) {
+    if (!parse_esc_key_str(esc_key_str)) {
       exit(1);
     }
   }
-
   if (esc_key_list == NULL) {
-    parse_esc_key_str(default_esc_key_str);
+    if (!parse_esc_key_str(default_esc_key_str)) {
+      exit(1);
+    }
   }
 }
 
@@ -2988,3 +4192,5 @@ int main(int argc, char **argv) {
   }
   return 0;
 }
+
+#endif /* !KLOAK_FUZZ */
