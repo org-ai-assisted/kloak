@@ -2565,7 +2565,7 @@ static void parse_esc_key_str(const char *esc_key_str) {
         "FATAL ERROR: Empty key name specified in escape key list!\n");
       exit(1);
 #else
-      goto fuzz_cleanup;
+      goto parse_esc_key_str_fuzz_cleanup;
 #endif
     }
 
@@ -2587,7 +2587,7 @@ static void parse_esc_key_str(const char *esc_key_str) {
           "FATAL ERROR: Empty key name specified in escape key list!\n");
         exit(1);
 #else
-        goto fuzz_cleanup;
+        goto parse_esc_key_str_fuzz_cleanup;
 #endif
       }
 
@@ -2601,14 +2601,14 @@ static void parse_esc_key_str(const char *esc_key_str) {
           sub_token);
         exit(1);
 #else
-        goto fuzz_cleanup;
+        goto parse_esc_key_str_fuzz_cleanup;
 #endif
       }
     }
   }
 
 #ifdef KLOAK_FUZZING
-fuzz_cleanup:
+parse_esc_key_str_fuzz_cleanup:
 #endif
   free(orig_key_str_copy);
 }
@@ -2875,7 +2875,7 @@ static void parse_cli_args(int argc, char **argv) {
       print_usage();
       exit(1);
 #else
-      goto fuzz_cleanup;
+      goto parse_cli_args_fuzz_cleanup;
 #endif
     } else if (getopt_rslt == 'd') {
       if (!parse_uint31_arg(optarg, 10, &max_delay)) {
@@ -2885,7 +2885,7 @@ static void parse_cli_args(int argc, char **argv) {
           optarg);
         exit(1);
 #else
-        goto fuzz_cleanup;
+        goto parse_cli_args_fuzz_cleanup;
 #endif
       }
     } else if (getopt_rslt == 's') {
@@ -2896,7 +2896,7 @@ static void parse_cli_args(int argc, char **argv) {
           optarg);
         exit(1);
 #else
-        goto fuzz_cleanup;
+        goto parse_cli_args_fuzz_cleanup;
 #endif
       }
     } else if (getopt_rslt == 'c') {
@@ -2907,7 +2907,7 @@ static void parse_cli_args(int argc, char **argv) {
           optarg);
         exit(1);
 #else
-        goto fuzz_cleanup;
+        goto parse_cli_args_fuzz_cleanup;
 #endif
       }
       if ((cursor_color >> 24) == 0) {
@@ -2930,14 +2930,14 @@ static void parse_cli_args(int argc, char **argv) {
       print_usage();
       exit(0);
 #else
-      goto fuzz_cleanup;
+      goto parse_cli_args_fuzz_cleanup;
 #endif
     } else {
 #ifndef KLOAK_FUZZING
       print_usage();
       exit(1);
 #else
-      goto fuzz_cleanup;
+      goto parse_cli_args_fuzz_cleanup;
 #endif
     }
   }
@@ -2947,7 +2947,7 @@ static void parse_cli_args(int argc, char **argv) {
   }
 
 #ifdef KLOAK_FUZZING
-fuzz_cleanup:
+parse_cli_args_fuzz_cleanup:
   (void)0;
 #endif
 }

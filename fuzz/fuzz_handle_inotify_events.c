@@ -51,6 +51,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   int pipefd[2] = { -1, -1 };
   int saved_inotify_fd = 0;
   ssize_t written = 0;
+  uint8_t name_len_byte = 0;
+  uint32_t mask = 0;
+  size_t name_len = 0;
+  struct inotify_event hdr = { 0 };
 
   if (size < 1U) {
     return 0;
@@ -68,11 +72,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
 
   while (cursor < size) {
-    uint8_t name_len_byte = 0;
-    uint32_t mask = 0;
-    size_t name_len = 0;
-    struct inotify_event hdr;
-
     /* Need at least 1 byte name length + 4 bytes mask. */
     if (size - cursor < 1U + sizeof(uint32_t)) {
       break;

@@ -31,6 +31,8 @@ set -o errexit
 set -o nounset
 set -o pipefail
 set -o errtrace
+shopt -s inherit_errexit
+shopt -s shift_verbose
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -41,5 +43,5 @@ export CFLAGS="${CFLAGS:--O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer-no-lin
 export LIB_FUZZING_ENGINE="${LIB_FUZZING_ENGINE:--fsanitize=fuzzer}"
 export LDFLAGS="${LDFLAGS:-}"
 
-mkdir -p -- "${OUT}"
-exec "${MAKE:-make}" -C "${REPO_ROOT}" fuzz
+mkdir --parents -- "${OUT}"
+exec "${MAKE:-make}" --directory="${REPO_ROOT}" fuzz

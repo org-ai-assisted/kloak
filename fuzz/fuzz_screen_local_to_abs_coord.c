@@ -64,6 +64,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
       goto cleanup;
     }
     memcpy(g, data + hdr_len + (size_t)i * sizeof(*g), sizeof(*g));
+    assert(i >= 0 && i < MAX_SCREEN_COUNT);
     state.output_geometries[i] = g;
   }
 
@@ -71,6 +72,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
 cleanup:
   for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+    assert(i >= 0 && i < MAX_SCREEN_COUNT);
     free(state.output_geometries[i]);
     state.output_geometries[i] = NULL;
   }
