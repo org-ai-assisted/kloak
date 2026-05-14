@@ -1,5 +1,15 @@
 /kloak
 /out/
+/src/xdg-shell-protocol.c
+/src/xdg-shell-protocol.h
+/src/xdg-output-protocol.c
+/src/xdg-output-protocol.h
+/src/wlr-layer-shell.c
+/src/wlr-layer-shell.h
+/src/wlr-virtual-pointer.c
+/src/wlr-virtual-pointer.h
+/src/virtual-keyboard.c
+/src/virtual-keyboard.h
 eventcap
 cmake-build-debug/
 .idea/
