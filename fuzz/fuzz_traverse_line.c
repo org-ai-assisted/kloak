@@ -28,15 +28,13 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Shim 'struct coord' for the harness — production sees this from
- * kloak.h. Identical layout. */
-struct coord {
-  int32_t x;
-  int32_t y;
-};
-
-#include "../src/kloak_traverse.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   /* Each call consumes:
    *   4 bytes   start.x (int32, LE)

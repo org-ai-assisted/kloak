@@ -17,8 +17,13 @@
  * binary => no missing-shared-lib failures inside the OSS-Fuzz
  * run-fuzzers container).
  */
-#include "../src/kloak_parsers.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 #include <stddef.h>
 
 static const int kBases[] = {16, 10, 8, 2};

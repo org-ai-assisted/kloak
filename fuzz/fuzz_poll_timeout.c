@@ -17,8 +17,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../src/kloak_poll_timeout.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   int64_t sched_time = 0;
   int64_t current_time = 0;

@@ -31,30 +31,13 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Stubs for the safe_* helpers parse_esc_key_str calls. Defined
- * before #include of kloak_parsers.inc.h so they are in scope
- * when the parser body is processed. malloc failure during
- * fuzzing of small inputs is not a realistic concern; if it
- * happens we abort rather than half-handle it. */
-static char *safe_strdup(const char *s) {
-  char *r = strdup(s);
-  if (r == NULL) {
-    abort();
-  }
-  return r;
-}
-
-static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size) {
-  void *r = reallocarray(ptr, nmemb, size);
-  if (r == NULL) {
-    abort();
-  }
-  return r;
-}
-
-#define KLOAK_INCLUDE_ESC_KEY_PARSER
-#include "../src/kloak_parsers.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 /* parse_esc_key_str writes a FATAL ERROR diagnostic to stderr on
  * every bad-token path. libFuzzer generates several hundred
  * thousand inputs per second; almost all of them are malformed,

@@ -23,8 +23,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../src/kloak_inotify.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   parse_inotify_buffer((const char *)data, (ssize_t)size, NULL);
   return 0;

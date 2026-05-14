@@ -26,22 +26,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Stubs required by parse_esc_key_str's body, which we use only
- * for one-time combo setup in LLVMFuzzerInitialize. */
-static char *safe_strdup(const char *s) {
-  char *r = strdup(s);
-  if (r == NULL) abort();
-  return r;
-}
-static void *safe_reallocarray(void *ptr, size_t nmemb, size_t size) {
-  void *r = reallocarray(ptr, nmemb, size);
-  if (r == NULL) abort();
-  return r;
-}
-
-#define KLOAK_INCLUDE_ESC_KEY_PARSER
-#include "../src/kloak_parsers.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 /* Pre-built esc_key state for each combo shape. Built once at
  * init; never freed (harness lifetime). Indexed by data[0] & 3. */
 struct combo_setup {

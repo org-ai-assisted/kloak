@@ -48,9 +48,13 @@
  * KLOAK_INCLUDE_ESC_KEY_PARSER undefined skips the esc_key
  * parser globals + safe_strdup forward decl, neither of which
  * parse_cli_args_pure references. */
-#include "../src/kloak_parsers.inc.h"
-#include "../src/kloak_cli_args.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 #define KLOAK_FUZZ_MAX_ARGS 16
 #define KLOAK_FUZZ_MAX_TOTAL_LEN 4096
 

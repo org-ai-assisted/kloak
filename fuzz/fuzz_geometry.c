@@ -24,8 +24,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../src/kloak_geometry.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 /* Pull a little-endian int32_t out of the fuzz input. Advances
  * *cursor by 4 bytes; if there are not enough bytes left, returns
  * 0 and clamps the cursor so the caller's next read is a no-op

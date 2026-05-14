@@ -20,8 +20,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "../src/kloak_layer_dims.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   uint32_t width = 0;
   uint32_t height = 0;

@@ -34,23 +34,13 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Shims for the production structs - identical layout. */
-struct coord {
-  int32_t x;
-  int32_t y;
-};
-struct screen_local_coord {
-  int32_t x;
-  int32_t y;
-  int32_t output_idx;
-  bool valid;
-};
-
-#include "../src/kloak_geometry.inc.h"
-#include "../src/kloak_coord.inc.h"
-#include "../src/kloak_traverse.inc.h"
-#include "../src/kloak_walk_cursor.inc.h"
-
+/* The pure helpers we test live in src/kloak.c. KLOAK_
+ * FUZZ carves out the production sections (wayland /
+ * libinput dispatch, globals, main) so this translation
+ * unit only compiles the helpers + the struct types they
+ * need. See the kloak.c header for details. */
+#define KLOAK_FUZZ
+#include "../src/kloak.c"
 #define KLOAK_FUZZ_MAX_GEOMS 8
 #define KLOAK_FUZZ_MAX_ITERATIONS 2048
 
