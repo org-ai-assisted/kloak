@@ -40,6 +40,126 @@
 #define max(a, b) ( ((a) > (b)) ? (a) : (b) )
 #endif
 
+/******************************/
+/* checked signed arithmetic  */
+/******************************/
+/*
+ * kloak's threat model treats signed integer overflow/underflow as a
+ * fatal condition: production builds use -ftrapv so any such operation
+ * crashes rather than risking memory corruption (see the developer
+ * notes at the top of kloak.c). These helpers make that contract
+ * explicit AND fuzzer-friendly. Each wraps a GCC/Clang
+ * __builtin_*_overflow and routes a detected overflow to
+ * kloak_arith_overflow().
+ *
+ * - Production (no KLOAK_FUZZING): kloak_arith_overflow() abort()s,
+ *   exactly matching the -ftrapv contract (immediate crash).
+ * - Fuzzing (KLOAK_FUZZING): kloak_arith_overflow() records the
+ *   condition and siglongjmp()s back to a recovery point armed by the
+ *   fuzz entry point, so the in-process fuzzer discards the offending
+ *   input and continues instead of dying.
+ *
+ * Because overflow is handled by these helpers, fuzz builds compile
+ * WITHOUT -ftrapv and WITHOUT -fwrapv but WITH -fsanitize=undefined,
+ * so any signed-arithmetic site that was NOT routed through a helper
+ * is still reported by UBSan rather than silently wrapping.
+ *
+ * Only GCC/Clang are supported (the builtins are compiler-specific),
+ * which is acceptable for this codebase.
+ */
+
+#ifdef KLOAK_FUZZING
+#include <setjmp.h>
+#include <signal.h>
+/*
+ * Defined in kloak.c. The fuzz entry point arms kloak_overflow_jmp
+ * with sigsetjmp() and sets kloak_overflow_jmp_armed before invoking a
+ * target, clears kloak_overflow_flagged beforehand, and inspects it
+ * afterwards.
+ */
+extern sigjmp_buf kloak_overflow_jmp;
+extern volatile sig_atomic_t kloak_overflow_jmp_armed;
+extern volatile sig_atomic_t kloak_overflow_flagged;
+#endif
+
+/*
+ * Defined in kloak.c. abort()s in production; under KLOAK_FUZZING
+ * records the overflow and longjmps to the armed recovery point.
+ */
+void kloak_arith_overflow(void);
+
+static inline int32_t add_i32(int32_t a, int32_t b) {
+  int32_t result = 0;
+  if (__builtin_add_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline int32_t sub_i32(int32_t a, int32_t b) {
+  int32_t result = 0;
+  if (__builtin_sub_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline int32_t mul_i32(int32_t a, int32_t b) {
+  int32_t result = 0;
+  if (__builtin_mul_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline int64_t add_i64(int64_t a, int64_t b) {
+  int64_t result = 0;
+  if (__builtin_add_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline int64_t sub_i64(int64_t a, int64_t b) {
+  int64_t result = 0;
+  if (__builtin_sub_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline int64_t mul_i64(int64_t a, int64_t b) {
+  int64_t result = 0;
+  if (__builtin_mul_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline ssize_t add_ssz(ssize_t a, ssize_t b) {
+  ssize_t result = 0;
+  if (__builtin_add_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline ssize_t sub_ssz(ssize_t a, ssize_t b) {
+  ssize_t result = 0;
+  if (__builtin_sub_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
+static inline ssize_t mul_ssz(ssize_t a, ssize_t b) {
+  ssize_t result = 0;
+  if (__builtin_mul_overflow(a, b, &result)) {
+    kloak_arith_overflow();
+  }
+  return result;
+}
+
 /*******************/
 /* core structures */
 /*******************/

@@ -115,6 +115,34 @@ static int randfd = 0;
 static bool did_wayland_init = false;
 static bool exit_on_wl_connect_failure = false;
 
+/*
+ * Checked-arithmetic overflow chokepoint. The inline add/sub/mul
+ * helpers in kloak.h call this when a __builtin overflow fires.
+ *
+ * In production this abort()s, matching the -ftrapv contract: a signed
+ * overflow is a fatal condition and crashing is an acceptable outcome
+ * per kloak's threat model. Under KLOAK_FUZZING the abort is deferred
+ * so the in-process fuzzer survives: the condition is recorded in
+ * kloak_overflow_flagged and, if the fuzz entry point has armed a
+ * recovery point, control siglongjmp()s straight back to it.
+ */
+#ifdef KLOAK_FUZZING
+sigjmp_buf kloak_overflow_jmp;
+volatile sig_atomic_t kloak_overflow_jmp_armed = 0;
+volatile sig_atomic_t kloak_overflow_flagged = 0;
+#endif
+
+void kloak_arith_overflow(void) {
+#ifdef KLOAK_FUZZING
+  kloak_overflow_flagged = 1;
+  if (kloak_overflow_jmp_armed) {
+    kloak_overflow_jmp_armed = 0;
+    siglongjmp(kloak_overflow_jmp, 1);
+  }
+#endif
+  abort();
+}
+
 static struct key_name_value key_table[] = {
   {"KEY_ESC", KEY_ESC},
   {"KEY_1", KEY_1},
@@ -476,13 +504,14 @@ static int64_t current_time_ms(void) {
 
   clock_gettime(CLOCK_MONOTONIC, &spec);
   assert(spec.tv_sec < INT64_MAX);
-  result = ((int64_t)spec.tv_sec * 1000) + (spec.tv_nsec / 1000000);
+  result = add_i64(mul_i64((int64_t)spec.tv_sec, 1000),
+    (int64_t)(spec.tv_nsec / 1000000));
   assert(result >= 0);
   if (start_time == 0) {
     start_time = result;
     return 0;
   }
-  return result - start_time;
+  return sub_i64(result, start_time);
 }
 
 static int64_t random_between(int64_t lower, int64_t upper) {
@@ -497,7 +526,7 @@ static int64_t random_between(int64_t lower, int64_t upper) {
     return upper;
   }
 
-  maxval = upper - lower + 1;
+  maxval = add_i64(sub_i64(upper, lower), 1);
   assert(maxval > 0);
   do {
     read_random(randval.raw, sizeof(int64_t));
@@ -506,10 +535,10 @@ static int64_t random_between(int64_t lower, int64_t upper) {
     } else {
       randval.val = llabs(randval.val);
     }
-  } while (randval.val >= (INT64_MAX - (INT64_MAX % maxval)));
+  } while (randval.val >= sub_i64(INT64_MAX, (INT64_MAX % maxval)));
 
   randval.val %= maxval;
-  return lower + randval.val;
+  return add_i64(lower, randval.val);
 }
 
 static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
@@ -518,8 +547,8 @@ static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
     || rect_height < 0) {
     return false;
   }
-  if (x >= rect_x && x < rect_x + rect_width
-    && y >= rect_y && y < rect_y + rect_height) {
+  if (x >= rect_x && x < add_i32(rect_x, rect_width)
+    && y >= rect_y && y < add_i32(rect_y, rect_height)) {
     return true;
   }
   return false;
@@ -544,32 +573,32 @@ static bool check_screen_touch(struct output_geometry scr1,
   }
 
   if (scr1.x > 0) {
-    scr1.x -= 1;
-    scr1.width += 2;
+    scr1.x = sub_i32(scr1.x, 1);
+    scr1.width = add_i32(scr1.width, 2);
   } else {
-    scr1.width += 1;
+    scr1.width = add_i32(scr1.width, 1);
   }
   if (scr1.y > 0) {
-    scr1.y -= 1;
-    scr1.height += 2;
+    scr1.y = sub_i32(scr1.y, 1);
+    scr1.height = add_i32(scr1.height, 2);
   } else {
-    scr1.height += 1;
+    scr1.height = add_i32(scr1.height, 1);
   }
 
   if (check_point_in_area(scr1.x, scr1.y, scr2.x, scr2.y, scr2.width,
     scr2.height)) {
     return true;
   }
-  if (check_point_in_area(scr1.x + scr1.width, scr1.y, scr2.x, scr2.y,
+  if (check_point_in_area(add_i32(scr1.x, scr1.width), scr1.y, scr2.x, scr2.y,
     scr2.width, scr2.height)) {
     return true;
   }
-  if (check_point_in_area(scr1.x, scr1.y + scr1.height, scr2.x, scr2.y,
+  if (check_point_in_area(scr1.x, add_i32(scr1.y, scr1.height), scr2.x, scr2.y,
     scr2.width, scr2.height)) {
     return true;
   }
-  if (check_point_in_area(scr1.x + scr1.width, scr1.y + scr1.height, scr2.x,
-    scr2.y, scr2.width, scr2.height)) {
+  if (check_point_in_area(add_i32(scr1.x, scr1.width),
+    add_i32(scr1.y, scr1.height), scr2.x, scr2.y, scr2.width, scr2.height)) {
     return true;
   }
   /*
@@ -594,16 +623,16 @@ static bool check_screen_touch(struct output_geometry scr1,
     scr1.height)) {
     return true;
   }
-  if (check_point_in_area(scr2.x + scr2.width, scr2.y, scr1.x, scr1.y,
+  if (check_point_in_area(add_i32(scr2.x, scr2.width), scr2.y, scr1.x, scr1.y,
     scr1.width, scr1.height)) {
     return true;
   }
-  if (check_point_in_area(scr2.x, scr2.y + scr2.height, scr1.x, scr1.y,
+  if (check_point_in_area(scr2.x, add_i32(scr2.y, scr2.height), scr1.x, scr1.y,
     scr1.width, scr1.height)) {
     return true;
   }
-  if (check_point_in_area(scr2.x + scr2.width, scr2.y + scr2.height, scr1.x,
-    scr1.y, scr1.width, scr1.height)) {
+  if (check_point_in_area(add_i32(scr2.x, scr2.width),
+    add_i32(scr2.y, scr2.height), scr1.x, scr1.y, scr1.width, scr1.height)) {
     return true;
   }
   return false;
@@ -641,15 +670,15 @@ static void recalc_global_space(struct disp_state *param_state) {
       continue;
     }
     screen_list[screen_list_len] = param_state->output_geometries[i];
-    screen_list_len++;
+    screen_list_len = add_ssz(screen_list_len, 1);
     if (cur_geom_x < ul_corner_x) {
       ul_corner_x = cur_geom_x;
     }
     if (cur_geom_y < ul_corner_y) {
       ul_corner_y = cur_geom_y;
     }
-    temp_br_x = cur_geom_x + cur_geom_width;
-    temp_br_y = cur_geom_y + cur_geom_height;
+    temp_br_x = add_i32(cur_geom_x, cur_geom_width);
+    temp_br_y = add_i32(cur_geom_y, cur_geom_height);
     if (temp_br_x > br_corner_x) {
       br_corner_x = temp_br_x;
     }
@@ -698,7 +727,7 @@ static void recalc_global_space(struct disp_state *param_state) {
       if (check_screen_touch(*conn_screen, *cur_screen)) {
         /* Found a touching screen! */
         conn_screen_list[conn_screen_list_len] = cur_screen;
-        conn_screen_list_len++;
+        conn_screen_list_len = add_ssz(conn_screen_list_len, 1);
       }
     }
   }
@@ -748,15 +777,15 @@ static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
     if (!(y >= cur_geom_y)) {
       continue;
     }
-    if (!(x < cur_geom_x + cur_geom_width)) {
+    if (!(x < add_i32(cur_geom_x, cur_geom_width))) {
       continue;
     }
-    if (!(y < cur_geom_y + cur_geom_height)) {
+    if (!(y < add_i32(cur_geom_y, cur_geom_height))) {
       continue;
     }
     out_data.output_idx = i;
-    out_data.x = x - cur_geom_x;
-    out_data.y = y - cur_geom_y;
+    out_data.x = sub_i32(x, cur_geom_x);
+    out_data.y = sub_i32(y, cur_geom_y);
     out_data.valid = true;
     break;
   }
@@ -797,8 +826,8 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
     return out_val;
   }
 
-  out_val.x = cur_geom_x + x;
-  out_val.y = cur_geom_y + y;
+  out_val.x = add_i32(cur_geom_x, x);
+  out_val.y = add_i32(cur_geom_y, y);
   return out_val;
 }
 
@@ -819,9 +848,9 @@ struct coord traverse_line(struct coord start, struct coord end,
     /* vertical line */
     out_val.x = start.x;
     if (start.y < end.y) {
-      out_val.y = start.y + pos;
+      out_val.y = add_i32(start.y, pos);
     } else {
-      out_val.y = start.y - pos;
+      out_val.y = sub_i32(start.y, pos);
     }
     return out_val;
   }
@@ -831,25 +860,25 @@ struct coord traverse_line(struct coord start, struct coord end,
 
   if (steep < 1) {
     if (start.x < end.x) {
-      out_val.x = start.x + pos;
+      out_val.x = add_i32(start.x, pos);
     } else {
-      out_val.x = start.x - pos;
+      out_val.x = sub_i32(start.x, pos);
     }
     if (start.y < end.y) {
-      out_val.y = start.y + (int32_t)((double) pos * steep);
+      out_val.y = add_i32(start.y, (int32_t)((double) pos * steep));
     } else {
-      out_val.y = start.y - (int32_t)((double) pos * steep);
+      out_val.y = sub_i32(start.y, (int32_t)((double) pos * steep));
     }
   } else {
     if (start.y < end.y) {
-      out_val.y = start.y + pos;
+      out_val.y = add_i32(start.y, pos);
     } else {
-      out_val.y = start.y - pos;
+      out_val.y = sub_i32(start.y, pos);
     }
     if (start.x < end.x) {
-      out_val.x = start.x + (int32_t)((double) pos * (1 / steep));
+      out_val.x = add_i32(start.x, (int32_t)((double) pos * (1 / steep)));
     } else {
-      out_val.x = start.x - (int32_t)((double) pos * (1 / steep));
+      out_val.x = sub_i32(start.x, (int32_t)((double) pos * (1 / steep)));
     }
   }
 
@@ -867,23 +896,25 @@ static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
 
   assert(should_draw_cursor);
 
-  start_x = x - rad;
+  start_x = sub_i32(x, rad);
   if (start_x < 0) start_x = 0;
-  start_y = y - rad;
+  start_y = sub_i32(y, rad);
   if (start_y < 0) start_y = 0;
-  end_x = x + rad;
-  if (end_x >= layer_width) end_x = layer_width - 1;
-  end_y = y + rad;
-  if (end_y >= layer_height) end_y = layer_height - 1;
+  end_x = add_i32(x, rad);
+  if (end_x >= layer_width) end_x = sub_i32(layer_width, 1);
+  end_y = add_i32(y, rad);
+  if (end_y >= layer_height) end_y = sub_i32(layer_height, 1);
 
   for (work_y = start_y; work_y <= end_y; work_y++) {
     for (work_x = start_x; work_x <= end_x; work_x++) {
+      int32_t pix_idx = add_i32(offset,
+        add_i32(mul_i32(work_y, layer_width), work_x));
       if (crosshair && work_x == x) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
+        pixbuf[pix_idx] = cursor_color;
       } else if (crosshair && work_y == y) {
-        pixbuf[offset + (work_y * layer_width + work_x)] = cursor_color;
+        pixbuf[pix_idx] = cursor_color;
       } else {
-        pixbuf[offset + (work_y * layer_width + work_x)] = 0x00000000;
+        pixbuf[pix_idx] = 0x00000000;
       }
     }
   }
@@ -951,7 +982,7 @@ static int32_t sleep_ms(int64_t ms) {
   assert(ms >= 0);
 
   ts.tv_sec = (time_t)(ms / 1000);
-  ts.tv_nsec = (ms % 1000) * 1000000;
+  ts.tv_nsec = (long)mul_i64(ms % 1000, 1000000);
   do {
     nanosleep_ret = nanosleep(&ts, &ts);
   } while (nanosleep_ret == -1 && errno == EINTR);
@@ -969,7 +1000,7 @@ static char *sgenprintf(const char *str, ...) {
   va_list extra_args;
 
   va_start(extra_args, str);
-  rslt_len = vsnprintf(NULL, 0, str, extra_args) + 1;
+  rslt_len = add_i32(vsnprintf(NULL, 0, str, extra_args), 1);
   va_end(extra_args);
   if (rslt_len == -1) {
     fprintf(stderr,
@@ -981,7 +1012,7 @@ static char *sgenprintf(const char *str, ...) {
   rslt_writelen = vsnprintf(rslt, (size_t)(rslt_len), str, extra_args);
   va_end(extra_args);
 
-  assert(rslt_writelen == rslt_len - 1);
+  assert(rslt_writelen == sub_i32(rslt_len, 1));
   return rslt;
 }
 
@@ -1093,7 +1124,7 @@ static int32_t get_ticks_from_scroll_accum(double *accum_ptr) {
     assert(scroll_ticks_d >= (INT32_MIN / SCROLL_UNITS_PER_TICK));
     scroll_ticks = (int32_t)(scroll_ticks_d);
     if (scroll_ticks != 0) {
-      scroll_accum += -(scroll_ticks * SCROLL_UNITS_PER_TICK);
+      scroll_accum += sub_i32(0, mul_i32(scroll_ticks, SCROLL_UNITS_PER_TICK));
       *accum_ptr = scroll_accum;
     }
   }
@@ -1543,17 +1574,23 @@ static void layer_surface_configure(void *data,
   layer->width = (int32_t)(width);
   layer->height = (int32_t)(height);
   layer->stride = (int32_t)(width * 4);
-  layer->size = layer->stride * layer->height;
+  /*
+   * mul_i32 catches stride*height overflow at the multiply itself,
+   * rather than relying on the assert below firing afterwards (which
+   * -ftrapv would beat to the punch in production anyway).
+   */
+  layer->size = mul_i32(layer->stride, layer->height);
   assert(layer->size >= 0);
   assert(layer->size <= INT32_MAX / MAX_UNRELEASED_FRAMES);
-  shm_fd = create_shm_file(layer->size * MAX_UNRELEASED_FRAMES);
+  shm_fd = create_shm_file(mul_i32(layer->size, MAX_UNRELEASED_FRAMES));
   if (shm_fd == -1) {
     fprintf(stderr,
       "FATAL ERROR: Cannot allocate shared memory block for frame: %s\n",
       strerror(errno));
     exit(1);
   }
-  layer->pixbuf = mmap(NULL, (size_t)(layer->size * MAX_UNRELEASED_FRAMES), PROT_READ | PROT_WRITE,
+  layer->pixbuf = mmap(NULL,
+    (size_t)mul_i32(layer->size, MAX_UNRELEASED_FRAMES), PROT_READ | PROT_WRITE,
     MAP_SHARED, shm_fd, 0);
   if (layer->pixbuf == MAP_FAILED) {
     safe_close(shm_fd);
@@ -1563,7 +1600,7 @@ static void layer_surface_configure(void *data,
     exit(1);
   }
   layer->shm_pool = wl_shm_create_pool(param_state->shm, shm_fd,
-    layer->size * MAX_UNRELEASED_FRAMES);
+    mul_i32(layer->size, MAX_UNRELEASED_FRAMES));
 
   zeroed_region = wl_compositor_create_region(param_state->compositor);
   wl_region_add(zeroed_region, 0, 0, 0, 0);
@@ -1629,10 +1666,10 @@ static void draw_frame(struct drawable_layer *layer) {
 
   assert(layer->size >= 0);
   assert(chosen_frame_idx >= 0);
-  assert((layer->size * chosen_frame_idx)
-    < (layer->size * MAX_UNRELEASED_FRAMES));
+  assert(mul_i32(layer->size, chosen_frame_idx)
+    < mul_i32(layer->size, MAX_UNRELEASED_FRAMES));
   buffer = wl_shm_pool_create_buffer(layer->shm_pool,
-    layer->size * chosen_frame_idx, layer->width, layer->height,
+    mul_i32(layer->size, chosen_frame_idx), layer->width, layer->height,
     layer->stride, WL_SHM_FORMAT_ARGB8888);
 
   assert(cursor_x < INT32_MAX && cursor_x >= 0);
@@ -1653,19 +1690,20 @@ static void draw_frame(struct drawable_layer *layer) {
   if (layer->last_drawn_cursor_x >= 0 && layer->last_drawn_cursor_y >= 0) {
     /* Damage the previous cursor location */
     damage_surface_enh(layer->surface,
-      layer->last_drawn_cursor_x - CURSOR_RADIUS,
-      layer->last_drawn_cursor_y - CURSOR_RADIUS,
-      layer->last_drawn_cursor_x + CURSOR_RADIUS + 1,
-      layer->last_drawn_cursor_y + CURSOR_RADIUS + 1);
+      sub_i32(layer->last_drawn_cursor_x, CURSOR_RADIUS),
+      sub_i32(layer->last_drawn_cursor_y, CURSOR_RADIUS),
+      add_i32(add_i32(layer->last_drawn_cursor_x, CURSOR_RADIUS), 1),
+      add_i32(add_i32(layer->last_drawn_cursor_y, CURSOR_RADIUS), 1));
   }
   if (cursor_is_on_layer) {
     /* Draw crosshairs at the pointer location */
-    draw_block(layer->pixbuf, (layer->size * chosen_frame_idx) / 4,
+    draw_block(layer->pixbuf, mul_i32(layer->size, chosen_frame_idx) / 4,
       scr_coord.x, scr_coord.y, layer->width, layer->height, CURSOR_RADIUS,
       true);
-    damage_surface_enh(layer->surface, scr_coord.x - CURSOR_RADIUS,
-      scr_coord.y - CURSOR_RADIUS, scr_coord.x + CURSOR_RADIUS + 1,
-      scr_coord.y + CURSOR_RADIUS + 1);
+    damage_surface_enh(layer->surface, sub_i32(scr_coord.x, CURSOR_RADIUS),
+      sub_i32(scr_coord.y, CURSOR_RADIUS),
+      add_i32(add_i32(scr_coord.x, CURSOR_RADIUS), 1),
+      add_i32(add_i32(scr_coord.y, CURSOR_RADIUS), 1));
   }
 
   wl_buffer_add_listener(buffer, &buffer_listener, NULL);
@@ -1824,45 +1862,45 @@ static struct input_packet * update_virtual_cursor(void) {
        * move backwards in that direction, but in only one dimension.
        */
       if (prev_trav_coord.x < trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x - 1,
-          trav_coord.y);
+        trav_scr_coord = abs_coord_to_screen_local_coord(
+          sub_i32(trav_coord.x, 1), trav_coord.y);
         if (trav_scr_coord.valid) {
-          start.x = trav_coord.x - 1;
+          start.x = sub_i32(trav_coord.x, 1);
           start.y = trav_coord.y;
-          end.x = trav_coord.x - 1;
+          end.x = sub_i32(trav_coord.x, 1);
           i = -1;
           continue;
         }
       }
       if (prev_trav_coord.x > trav_coord.x) {
-        trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x + 1,
-          trav_coord.y);
+        trav_scr_coord = abs_coord_to_screen_local_coord(
+          add_i32(trav_coord.x, 1), trav_coord.y);
         if (trav_scr_coord.valid) {
-          start.x = trav_coord.x + 1;
+          start.x = add_i32(trav_coord.x, 1);
           start.y = trav_coord.y;
-          end.x = trav_coord.x + 1;
+          end.x = add_i32(trav_coord.x, 1);
           i = -1;
           continue;
         }
       }
       if (prev_trav_coord.y < trav_coord.y) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y - 1);
+          sub_i32(trav_coord.y, 1));
         if (trav_scr_coord.valid) {
-          start.y = trav_coord.y - 1;
+          start.y = sub_i32(trav_coord.y, 1);
           start.x = trav_coord.x;
-          end.y = trav_coord.y -1;
+          end.y = sub_i32(trav_coord.y, 1);
           i = -1;
           continue;
         }
       }
       if (prev_trav_coord.y > trav_coord.y) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
-          trav_coord.y + 1);
+          add_i32(trav_coord.y, 1));
         if (trav_scr_coord.valid) {
-          start.y = trav_coord.y + 1;
+          start.y = add_i32(trav_coord.y, 1);
           start.x = trav_coord.x;
-          end.y = trav_coord.y + 1;
+          end.y = add_i32(trav_coord.y, 1);
           i = -1;
           continue;
         }
@@ -1925,9 +1963,10 @@ static struct input_packet *update_mouse_scroll(void) {
   if ((vert_scroll_ticks != 0) || (horiz_scroll_ticks != 0)) {
     if ((old_ev_packet = TAILQ_LAST(&evq_head, tailhead_evq))
       && (old_ev_packet->packet_type == KLOAK_PACKET_TYPE_MOUSESCROLL)) {
-      old_ev_packet->data.mousescroll.vert_scroll_ticks += vert_scroll_ticks;
-      old_ev_packet->data.mousescroll.horiz_scroll_ticks
-        += horiz_scroll_ticks;
+      old_ev_packet->data.mousescroll.vert_scroll_ticks = add_i32(
+        old_ev_packet->data.mousescroll.vert_scroll_ticks, vert_scroll_ticks);
+      old_ev_packet->data.mousescroll.horiz_scroll_ticks = add_i32(
+        old_ev_packet->data.mousescroll.horiz_scroll_ticks, horiz_scroll_ticks);
       return NULL;
     } else {
       ev_packet = safe_calloc(1, sizeof(struct input_packet));
@@ -2154,10 +2193,10 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     cursor_y += rel_y;
     if (cursor_x < state.pointer_space_x) cursor_x = state.pointer_space_x;
     if (cursor_y < state.pointer_space_y) cursor_y = state.pointer_space_y;
-    if (cursor_x > state.global_space_width - 1)
-      cursor_x = state.global_space_width - 1;
-    if (cursor_y > state.global_space_height - 1)
-      cursor_y = state.global_space_height - 1;
+    if (cursor_x > sub_i32(state.global_space_width, 1))
+      cursor_x = sub_i32(state.global_space_width, 1);
+    if (cursor_y > sub_i32(state.global_space_height, 1))
+      cursor_y = sub_i32(state.global_space_height, 1);
     ev_packet = update_virtual_cursor();
     libinput_event_destroy(li_event);
     if (!ev_packet) {
@@ -2310,9 +2349,10 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
   }
 
   current_time = current_time_ms();
-  lower_bound = min(max(prev_release_time - current_time, 0), max_delay);
+  lower_bound = min(max(sub_i64(prev_release_time, current_time), 0),
+    max_delay);
   random_delay = random_between(lower_bound, max_delay);
-  ev_packet->sched_time = current_time + random_delay;
+  ev_packet->sched_time = add_i64(current_time, random_delay);
   TAILQ_INSERT_TAIL(&evq_head, ev_packet, entries);
   prev_release_time = ev_packet->sched_time;
 }
@@ -2342,10 +2382,12 @@ static void release_scheduled_input_events(void) {
       assert(state.global_space_height >= state.pointer_space_y);
       zwlr_virtual_pointer_v1_motion_absolute(
         state.virt_pointer, (uint32_t)(packet->sched_time),
-        (uint32_t)(packet->data.mousemove.cursor_x - state.pointer_space_x),
-        (uint32_t)(packet->data.mousemove.cursor_y - state.pointer_space_y),
-        (uint32_t)(state.global_space_width - state.pointer_space_x),
-        (uint32_t)(state.global_space_height - state.pointer_space_y));
+        (uint32_t)sub_i32(packet->data.mousemove.cursor_x,
+          state.pointer_space_x),
+        (uint32_t)sub_i32(packet->data.mousemove.cursor_y,
+          state.pointer_space_y),
+        (uint32_t)sub_i32(state.global_space_width, state.pointer_space_x),
+        (uint32_t)sub_i32(state.global_space_height, state.pointer_space_y));
       zwlr_virtual_pointer_v1_frame(state.virt_pointer);
 
     } else if (packet->packet_type == KLOAK_PACKET_TYPE_LIBINPUT) {
@@ -2370,8 +2412,9 @@ static void release_scheduled_input_events(void) {
       if (packet->data.mousescroll.vert_scroll_ticks != 0) {
         zwlr_virtual_pointer_v1_axis(state.virt_pointer,
           (uint32_t)(packet->sched_time), WL_POINTER_AXIS_VERTICAL_SCROLL,
-          wl_fixed_from_int(packet->data.mousescroll.vert_scroll_ticks
-            * SCROLL_ANGLE_PER_TICK));
+          wl_fixed_from_int(mul_i32(
+            packet->data.mousescroll.vert_scroll_ticks,
+            SCROLL_ANGLE_PER_TICK)));
         zwlr_virtual_pointer_v1_axis_discrete(state.virt_pointer,
           (uint32_t)(packet->sched_time), WL_POINTER_AXIS_VERTICAL_SCROLL,
           wl_fixed_from_int(SCROLL_ANGLE_PER_TICK),
@@ -2381,8 +2424,9 @@ static void release_scheduled_input_events(void) {
       if (packet->data.mousescroll.horiz_scroll_ticks != 0) {
         zwlr_virtual_pointer_v1_axis(state.virt_pointer,
           (uint32_t)(packet->sched_time), WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-          wl_fixed_from_int(packet->data.mousescroll.horiz_scroll_ticks
-            * SCROLL_ANGLE_PER_TICK));
+          wl_fixed_from_int(mul_i32(
+            packet->data.mousescroll.horiz_scroll_ticks,
+            SCROLL_ANGLE_PER_TICK)));
         zwlr_virtual_pointer_v1_axis_discrete(state.virt_pointer,
           (uint32_t)(packet->sched_time), WL_POINTER_AXIS_HORIZONTAL_SCROLL,
           wl_fixed_from_int(SCROLL_ANGLE_PER_TICK),
@@ -2430,9 +2474,10 @@ static void handle_inotify_events(void) {
   while (true) {
     assert(rem_len >= (ssize_t)(sizeof(struct inotify_event)));
     assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
-    struct_len = ((ssize_t)(sizeof(struct inotify_event)) + (ssize_t)(ie->len));
+    struct_len = add_ssz((ssize_t)(sizeof(struct inotify_event)),
+      (ssize_t)(ie->len));
     assert(struct_len <= rem_len);
-    rem_len -= struct_len;
+    rem_len = sub_ssz(rem_len, struct_len);
     assert(rem_len >= 0);
 
     if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
@@ -2519,7 +2564,7 @@ static int calc_poll_timeout(void) {
     return -1;
   }
 
-  timeout_duration = packet->sched_time - current_time_ms();
+  timeout_duration = sub_i64(packet->sched_time, current_time_ms());
   if (timeout_duration < 0) {
     return 0;
   }
