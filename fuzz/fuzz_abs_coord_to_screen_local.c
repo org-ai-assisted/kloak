@@ -23,20 +23,24 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  /* Static backing storage - see fuzz_recalc_global_space.c for why
+     (overflow siglongjmp would leak a heap allocation). */
+  static struct output_geometry geoms[MAX_SCREEN_COUNT];
   int32_t output_count = 0;
   size_t needed = 0;
   size_t hdr_len = 0;
   int32_t i = 0;
   int32_t query_x = 0;
   int32_t query_y = 0;
-  struct output_geometry *g = NULL;
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   hdr_len = 1U + 2U * sizeof(int32_t);
   if (size < hdr_len) {
     return 0;
@@ -50,24 +54,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
 
   memset(state.output_geometries, 0, sizeof(state.output_geometries));
+  memset(geoms, 0, sizeof(geoms));
 
   for (i = 0; i < output_count; i++) {
-    g = malloc(sizeof(*g));
-    if (g == NULL) {
-      goto cleanup;
-    }
-    memcpy(g, data + hdr_len + (size_t)i * sizeof(*g), sizeof(*g));
     assert(i >= 0 && i < MAX_SCREEN_COUNT);
-    state.output_geometries[i] = g;
+    memcpy(&geoms[i], data + hdr_len + (size_t)i * sizeof(geoms[i]),
+      sizeof(geoms[i]));
+    state.output_geometries[i] = &geoms[i];
   }
 
   (void)abs_coord_to_screen_local_coord(query_x, query_y);
 
-cleanup:
-  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-    assert(i >= 0 && i < MAX_SCREEN_COUNT);
-    free(state.output_geometries[i]);
-    state.output_geometries[i] = NULL;
-  }
+  memset(state.output_geometries, 0, sizeof(state.output_geometries));
   return 0;
 }

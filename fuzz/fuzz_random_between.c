@@ -29,6 +29,7 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <fcntl.h>
 #include <stdbool.h>
@@ -43,6 +44,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   int64_t lower = 0;
   int64_t upper = 0;
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   if (!randfd_inited) {
     randfd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     assert(randfd > 0);

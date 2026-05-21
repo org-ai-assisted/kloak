@@ -38,6 +38,7 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -63,6 +64,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   struct input_packet *seed_scroll = NULL;
   struct input_packet *result = NULL;
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   if (!initialized) {
     TAILQ_INIT(&evq_head);
     initialized = true;

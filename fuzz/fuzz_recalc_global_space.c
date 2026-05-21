@@ -30,17 +30,26 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  /*
+   * Static backing storage rather than malloc: recalc_global_space's
+   * checked arithmetic can siglongjmp out on overflow (via
+   * KLOAK_FUZZ_OVERFLOW_GUARD), which would skip a heap cleanup and
+   * leak. Static storage has nothing to leak - the overflow path
+   * just returns, and the next iteration overwrites it.
+   */
+  static struct output_geometry geoms[MAX_SCREEN_COUNT];
   int32_t output_count = 0;
   size_t needed = 0;
   int32_t i = 0;
-  struct output_geometry *g = NULL;
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   if (size < 1U) {
     return 0;
   }
@@ -50,28 +59,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
   }
 
-  /* Defensive: clear all slots before populating, in case a previous
-     iteration left a slot allocated (it should not, but the cost is
-     trivial relative to the cleanup branch below). */
   memset(state.output_geometries, 0, sizeof(state.output_geometries));
+  memset(geoms, 0, sizeof(geoms));
 
   for (i = 0; i < output_count; i++) {
-    g = malloc(sizeof(*g));
-    if (g == NULL) {
-      goto cleanup;
-    }
-    memcpy(g, data + 1U + (size_t)i * sizeof(*g), sizeof(*g));
     assert(i >= 0 && i < MAX_SCREEN_COUNT);
-    state.output_geometries[i] = g;
+    memcpy(&geoms[i], data + 1U + (size_t)i * sizeof(geoms[i]),
+      sizeof(geoms[i]));
+    state.output_geometries[i] = &geoms[i];
   }
 
   recalc_global_space(&state);
 
-cleanup:
-  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-    assert(i >= 0 && i < MAX_SCREEN_COUNT);
-    free(state.output_geometries[i]);
-    state.output_geometries[i] = NULL;
-  }
+  memset(state.output_geometries, 0, sizeof(state.output_geometries));
   return 0;
 }

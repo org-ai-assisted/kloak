@@ -25,6 +25,7 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   int32_t fields[6] = { 0 };
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   if (size < sizeof(fields)) {
     return 0;
   }

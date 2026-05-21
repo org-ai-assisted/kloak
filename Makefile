@@ -153,6 +153,16 @@ FUZZ_PROTO_HEADERS  := src/xdg-shell-protocol.h src/xdg-output-protocol.h src/wl
 .PHONY : fuzz
 fuzz : $(FUZZ_BINS)
 
+## Fuzz builds drop -ftrapv: the checked-arithmetic helpers in
+## kloak.h (add_i32 etc.) detect signed overflow via
+## __builtin_*_overflow and route it through kloak_arith_overflow(),
+## which siglongjmp()s back to the harness under KLOAK_FUZZING
+## instead of crashing. Keeping -ftrapv would SIGILL on overflow and
+## kill the in-process fuzzer. -fsanitize=undefined (from the
+## inherited CFLAGS) stays, so any signed-arithmetic site NOT routed
+## through a helper is still reported as UB rather than masked.
+FUZZ_CFLAGS := $(filter-out -ftrapv,$(CFLAGS))
+
 $(OUT)/fuzz_% : fuzz/fuzz_%.c src/kloak.c src/kloak.h $(FUZZ_PROTO_SRCS) $(FUZZ_PROTO_HEADERS)
 	@mkdir -p -- $(@D)
-	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -Wl,-rpath,'$$ORIGIN' $(CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)
+	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -Wl,-rpath,'$$ORIGIN' $(FUZZ_CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)

@@ -31,12 +31,21 @@
 #define KLOAK_FUZZING
 #endif
 #include "../src/kloak.c"
+#include "fuzz_overflow_recovery.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  /*
+   * Static backing buffer rather than calloc: draw_block's checked
+   * arithmetic can siglongjmp out on overflow (via
+   * KLOAK_FUZZ_OVERFLOW_GUARD), which would skip a free() and leak.
+   * Sized to the maximum the dim/offset bounds below allow:
+   * offset (< 1024) + layer_width (<= 256) * layer_height (<= 256).
+   */
+  static uint32_t pixbuf[1024U + (256U * 256U)];
   struct {
     int32_t x;
     int32_t y;
@@ -46,37 +55,34 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     int32_t offset;
     uint8_t crosshair;
   } hdr = { 0 };
-  uint32_t *pixbuf = NULL;
   size_t pixbuf_len = 0;
 
+  KLOAK_FUZZ_OVERFLOW_GUARD();
   if (size < sizeof(hdr)) {
     return 0;
   }
   memcpy(&hdr, data, sizeof(hdr));
 
   /*
-   * Clamp using uint32_t modulo (well-defined wrap) then cast back
-   * so the harness arithmetic itself stays inside -ftrapv. Bands
-   * cover both clamp directions in draw_block:
-   *   layer_width/height: [1, 256]
-   *   offset:             [0, 1023]
-   *   rad:                [0, 255]
-   *   x, y:               [0, 1023]
-   * which puts x +/- rad on both sides of [0, layer_width).
+   * Bound only the layer dimensions and offset, via uint32_t modulo
+   * (well-defined wrap), so the write index stays inside the static
+   * pixbuf and draw_block's internal end_x/end_y clamps hold.
+   *
+   * x / y / rad are deliberately left UNbounded now that the
+   * foundation routes draw_block's x +/- rad and
+   * offset + work_y*layer_width + work_x arithmetic through the
+   * checked helpers: an overflowing coordinate is detected and
+   * recovered via KLOAK_FUZZ_OVERFLOW_GUARD rather than trapping, so
+   * the fuzzer is free to explore the full int32 coordinate space.
    */
   hdr.layer_width = (int32_t)(((uint32_t)hdr.layer_width) % 256U) + 1;
   hdr.layer_height = (int32_t)(((uint32_t)hdr.layer_height) % 256U) + 1;
   hdr.offset = (int32_t)(((uint32_t)hdr.offset) % 1024U);
-  hdr.rad = (int32_t)(((uint32_t)hdr.rad) % 256U);
-  hdr.x = (int32_t)(((uint32_t)hdr.x) % 1024U);
-  hdr.y = (int32_t)(((uint32_t)hdr.y) % 1024U);
 
   pixbuf_len = (size_t)hdr.offset
     + ((size_t)hdr.layer_width * (size_t)hdr.layer_height);
-  pixbuf = calloc(pixbuf_len, sizeof(uint32_t));
-  if (pixbuf == NULL) {
-    return 0;
-  }
+  assert(pixbuf_len <= sizeof(pixbuf) / sizeof(pixbuf[0]));
+  memset(pixbuf, 0, pixbuf_len * sizeof(pixbuf[0]));
 
   should_draw_cursor = true;
   cursor_color = 0xff00ff00U;
@@ -84,6 +90,5 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   draw_block(pixbuf, hdr.offset, hdr.x, hdr.y, hdr.layer_width,
     hdr.layer_height, hdr.rad, (hdr.crosshair & 0x1U) != 0U);
 
-  free(pixbuf);
   return 0;
 }
