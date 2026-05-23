@@ -150,7 +150,7 @@ FUZZ_BINS           := $(patsubst fuzz/%.c,$(OUT)/%,$(FUZZ_SRCS))
 FUZZ_PROTO_SRCS     := src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c
 FUZZ_PROTO_HEADERS  := src/xdg-shell-protocol.h src/xdg-output-protocol.h src/wlr-layer-shell.h src/wlr-virtual-pointer.h src/virtual-keyboard.h
 
-.PHONY : fuzz
+.PHONY : all clean fuzz
 fuzz : $(FUZZ_BINS)
 
 ## Fuzz builds drop -ftrapv: the checked-arithmetic helpers in
@@ -163,6 +163,6 @@ fuzz : $(FUZZ_BINS)
 ## through a helper is still reported as UB rather than masked.
 FUZZ_CFLAGS := $(filter-out -ftrapv,$(CFLAGS))
 
-$(OUT)/fuzz_% : fuzz/fuzz_%.c src/kloak.c src/kloak.h $(FUZZ_PROTO_SRCS) $(FUZZ_PROTO_HEADERS)
+$(OUT)/fuzz_% : fuzz/fuzz_%.c fuzz/fuzz_overflow_recovery.h src/kloak.c src/kloak.h $(FUZZ_PROTO_SRCS) $(FUZZ_PROTO_HEADERS)
 	@mkdir -p -- $(@D)
 	$(CC) -g $< $(FUZZ_PROTO_SRCS) -DKLOAK_FUZZING -o $@ -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -Wl,-rpath,'$$ORIGIN' $(FUZZ_CFLAGS) $(LDFLAGS) $(LIB_FUZZING_ENGINE)

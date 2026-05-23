@@ -47,7 +47,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   KLOAK_FUZZ_OVERFLOW_GUARD();
   if (!randfd_inited) {
     randfd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    assert(randfd > 0);
+    assert(randfd != -1);
     randfd_inited = true;
   }
 
