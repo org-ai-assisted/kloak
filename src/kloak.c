@@ -2439,6 +2439,32 @@ static void release_scheduled_input_events(void) {
   }
 }
 
+/* True only for a canonical evdev node name "event<N>" (N one or more decimal
+ * digits), which is what udev creates. A bare "event" or an "event"-prefixed
+ * non-device name (e.g. "eventfoo") must not be grabbed: only /dev/input/event*
+ * nodes carry input, and a loose prefix match would attach a wrongly-named
+ * node. */
+static bool is_event_device_name(const char *name) {
+  size_t i = 0;
+  const size_t prefix_len = strlen("event");
+
+  if (name == NULL) {
+    return false;
+  }
+  if (strncmp(name, "event", prefix_len) != 0) {
+    return false;
+  }
+  if (name[prefix_len] == '\0') {
+    return false;
+  }
+  for (i = prefix_len; name[i] != '\0'; i++) {
+    if (name[i] < '0' || name[i] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void handle_inotify_events(void) {
   static char *read_buf = NULL;
   ssize_t read_len = 0;
@@ -2474,7 +2500,7 @@ static void handle_inotify_events(void) {
     rem_len -= struct_len;
     assert(rem_len >= 0);
 
-    if (ie->len > 0 && strncmp(ie->name, "event", strlen("event")) == 0) {
+    if (ie->len > 0 && is_event_device_name(ie->name)) {
       if (ie->mask & IN_CREATE) {
         attach_input_device(ie->name);
       } else {
@@ -2745,7 +2771,7 @@ static void applayer_libinput_init(void) {
       continue;
     }
 
-    if (strncmp(input_dir_entry->d_name, "event", strlen("event")) != 0) {
+    if (!is_event_device_name(input_dir_entry->d_name)) {
       continue;
     }
 
