@@ -1245,7 +1245,9 @@ static void registry_handle_global_remove(void *data,
         wl_output_release(param_state->outputs[i]);
         param_state->outputs[i] = NULL;
         param_state->output_names[i] = 0;
-        zxdg_output_v1_destroy(param_state->xdg_outputs[i]);
+        if (param_state->xdg_outputs[i] != NULL) {
+          zxdg_output_v1_destroy(param_state->xdg_outputs[i]);
+        }
         param_state->xdg_outputs[i] = NULL;
         free(param_state->pending_output_geometries[i]);
         param_state->pending_output_geometries[i] = NULL;
@@ -1300,6 +1302,7 @@ static void kb_handle_keymap(void *data,
   uint32_t format, int32_t fd, uint32_t size) {
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
+  struct stat kb_map_stat = {0};
 
   if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
     fprintf(stderr,
@@ -1309,6 +1312,19 @@ static void kb_handle_keymap(void *data,
   }
 
   assert(size <= INT32_MAX);
+
+  /* The compositor controls both `fd` and `size`. A `size` larger than the
+   * backing fd makes the reads below (memchr, and the later strcmp) touch pages
+   * past end-of-file and fault with SIGBUS, so reject a short fd here. */
+  if (fstat(fd, &kb_map_stat) != 0) {
+    fprintf(stderr, "FATAL ERROR: Could not stat xkb layout fd!\n");
+    exit(1);
+  }
+  if (kb_map_stat.st_size < (off_t)(size)) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor sent xkb keymap fd shorter than declared size!\n");
+    exit(1);
+  }
 
   kb_map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (kb_map_shm == MAP_FAILED) {
@@ -2934,7 +2950,12 @@ int main(int argc, char **argv) {
   if (did_wayland_init) {
     while (true) {
       while (wl_display_prepare_read(state.display) != 0) {
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       }
       wl_display_flush_safe(state.display);
 
@@ -2985,7 +3006,12 @@ int main(int argc, char **argv) {
             strerror(errno));
           exit(1);
         }
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       } else {
         wl_display_cancel_read(state.display);
       }
