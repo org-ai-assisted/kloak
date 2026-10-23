@@ -31,6 +31,7 @@
 #define MAX_UNRELEASED_FRAMES 3
 #define POLL_FD_COUNT 3
 #define INOTIFY_READ_BUF_LEN 16384
+#define MAX_INIT_ATTEMPTS 8
 
 #ifndef min
 #define min(a, b) ( ((a) < (b)) ? (a) : (b) )
@@ -45,6 +46,81 @@
 /*******************/
 
 /*
+ * Defines the type of a buffered input event.
+ */
+enum input_packet_type {
+  KLOAK_PACKET_TYPE_MOUSEMOVE,
+  KLOAK_PACKET_TYPE_MOUSESCROLL,
+  KLOAK_PACKET_TYPE_FAKE_LIBINPUT,
+  KLOAK_PACKET_TYPE_LIBINPUT
+};
+
+/*
+ * A container for storing the actual data in an input_packet, as explained
+ * below.
+ */
+union input_packet_data {
+  struct {
+    int32_t cursor_x;
+    int32_t cursor_y;
+  } mousemove;
+
+  struct {
+    int32_t vert_scroll_ticks;
+    int32_t horiz_scroll_ticks;
+  } mousescroll;
+
+  struct {
+    enum libinput_event_type event_type;
+    enum libinput_button_state button_state;
+    enum libinput_key_state key_state;
+    uint32_t button_code;
+  } fake_libinput;
+
+  struct {
+    struct libinput_event *li_event;
+  } libinput;
+};
+
+/*
+ * Defines a buffered input event. Three types of events are supported, mouse
+ * movement events, scroll events, and libinput events.
+ *
+ * - Mouse movement events are defined as a cursor position in compositor
+ *   global space.
+ * - Scroll events are defined as a pair of scroll "tick" values, one for each
+ *   dimension (vertical and horizontal).
+ * - Fake libinput events are button and keypress events that should be
+ *   treated similar to libinput events but which do not depend on
+ *   undocumented aspects of libinput. If libinput allowed us to manually
+ *   create button and keypress events for use later, we would use it instead,
+ *   but that feature doesn't exist.
+ * - libinput events are raw events directly from libinput, intended for
+ *   release unmodified at a later time.
+ *
+ * All kinds of events have a scheduled release time. An `entries` field is
+ * included to allow buffered events to be stored in a tail queue. A separate
+ * `trackq_entries` field links the same packet into a device's press-tracking
+ * queue: a press packet is on the main event queue and its device's tracking
+ * queue at the same time, and a single TAILQ_ENTRY link cannot be on two
+ * queues at once.
+ *
+ * The actual data of the input packet is in the `data` field. The fields of
+ * `data` (mousemove, mousescroll, fake_libinput, libinput) correspond to the
+ * `KLOAK_PACKET_TYPE_MOUSEMOVE`, `KLOAK_PACKET_TYPE_MOUSESCROLL`,
+ * `KLOAK_PACKET_TYPE_FAKE_LIBINPUT`, and `KLOAK_PACKET_TYPE_LIBINPUT` packet
+ * types, respectively.
+ */
+struct input_packet {
+  enum input_packet_type packet_type;
+  int64_t sched_time;
+  uint32_t refcount;
+  TAILQ_ENTRY(input_packet) entries;
+  TAILQ_ENTRY(input_packet) trackq_entries;
+  union input_packet_data data;
+};
+
+/*
  * Defines a libinput device on the system by its device pointer and file
  * name. Intended for use in a doubly-linked list.
  */
@@ -57,6 +133,7 @@ struct li_device_info {
   bool caps_lock_held;
   enum libinput_led last_led_state;
   uint32_t refcount;
+  TAILQ_HEAD(tailhead_trackq, input_packet) trackq_head;
   LIST_ENTRY(li_device_info) entries;
 };
 
@@ -126,61 +203,6 @@ struct coord {
 };
 
 /*
- * Defines the type of a buffered input event.
- */
-enum input_packet_type {
-  KLOAK_PACKET_TYPE_MOUSEMOVE,
-  KLOAK_PACKET_TYPE_MOUSESCROLL,
-  KLOAK_PACKET_TYPE_LIBINPUT
-};
-
-/*
- * A container for storing the actual data in an input_packet, as explained
- * below.
- */
-union input_packet_data {
-  struct {
-    int32_t cursor_x;
-    int32_t cursor_y;
-  } mousemove;
-
-  struct {
-    int32_t vert_scroll_ticks;
-    int32_t horiz_scroll_ticks;
-  } mousescroll;
-
-  struct {
-    struct libinput_event *li_event;
-  } libinput;
-};
-
-/*
- * Defines a buffered input event. Three types of events are supported, mouse
- * movement events, scroll events, and libinput events.
- *
- * - Mouse movement events are defined as a cursor position in compositor
- *   global space.
- * - Scroll events are defined as a pair of scroll "tick" values, one for each
- *   dimension (vertical and horizontal).
- * - libinput events are raw events directly from libinput, intended for
- *   release unmodified at a later time.
- *
- * All kinds of events have a scheduled release time. An `entries` field is
- * included to allow buffered events to be stored in a tail queue.
- *
- * The actual data of the input packet is in the `data` field. The fields of
- * `data` (mousemove, mousescroll, libinput) correspond to the
- * `KLOAK_PACKET_TYPE_MOUSEMOVE`, `KLOAK_PACKET_TYPE_MOUSESCROLL`, and
- * `KLOAK_PACKET_TYPE_LIBINPUT` packet types, respectively.
- */
-struct input_packet {
-  enum input_packet_type packet_type;
-  int64_t sched_time;
-  TAILQ_ENTRY(input_packet) entries;
-  union input_packet_data data;
-};
-
-/*
  * Monolithic Wayland state object.
  */
 struct disp_state {
@@ -198,6 +220,8 @@ struct disp_state {
   uint32_t output_names[MAX_SCREEN_COUNT];
   struct zxdg_output_manager_v1 *xdg_output_manager;
   struct zxdg_output_v1 *xdg_outputs[MAX_SCREEN_COUNT];
+  bool xdg_output_reconfig_flags[MAX_SCREEN_COUNT];
+  bool wl_output_remove_flags[MAX_SCREEN_COUNT];
   struct output_geometry *output_geometries[MAX_SCREEN_COUNT];
   struct output_geometry *pending_output_geometries[MAX_SCREEN_COUNT];
   int32_t global_space_width;
@@ -273,13 +297,12 @@ static DIR *safe_opendir(const char *name);
 static void safe_closedir(DIR *dirp);
 
 /*
- * Increments the reference count of an li_device_info struct.
+ * Reference count increment and decrement/free handlers for refcounted
+ * structs.
  */
+static void input_packet_ref(struct input_packet *ip);
+static void input_packet_unref(struct input_packet *ip);
 static void li_device_info_ref(struct li_device_info *ldi);
-
-/*
- * Decrements the reference count of an li_device_info struct,
- */
 static void li_device_info_unref(struct li_device_info *ldi);
 
 /*
@@ -414,6 +437,24 @@ static int32_t get_ticks_from_scroll_accum(double *accum_ptr);
  * is received, aborts the program.
  */
 static void wl_display_flush_safe(struct wl_display *display);
+
+/*
+ * Sets up structures, objects, and listeners for a newly attached display.
+ */
+static void wl_init_new_display(struct disp_state *param_state,
+  ssize_t disp_idx);
+
+/*
+ * Checks if a display state sync can be done. If so, commits pending geometry
+ * information, cleans up removed displays and their associated data, and
+ * recalculates global space.
+ */
+static void display_sync_maybe(struct disp_state *state);
+
+/*
+ * Adds the specified event packet to the event queue.
+ */
+static void queue_input_event(struct input_packet *ev_packet);
 
 /********************/
 /* wayland handling */
@@ -605,6 +646,13 @@ static void applayer_inotify_init(void);
  * Initializes the fd poll mechanism.
  */
 static void applayer_poll_init(void);
+
+/*
+ * Checks if an option has been specified twice. Terminates the program if so,
+ * marks the option as having been seen otherwise.
+ */
+static void check_dup_arg_and_mark(int opt, int *seen_opts,
+  ssize_t *seen_opts_pos_ptr);
 
 /*
  * Parses command-line arguments.

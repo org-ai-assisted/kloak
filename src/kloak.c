@@ -349,15 +349,37 @@ static void safe_closedir(DIR *dirp) {
   }
 }
 
+static void input_packet_ref(struct input_packet *ip) {
+  ip->refcount += 1;
+  printf("Reffed %lu %u\n", (uint64_t)ip, ip->refcount);
+  assert(ip->refcount != 0);
+}
+
+static void input_packet_unref(struct input_packet *ip) {
+  ip->refcount -= 1;
+  printf("Unreffed %lu %u\n", (uint64_t)ip, ip->refcount);
+  assert(ip->refcount != UINT32_MAX);
+  if (ip->refcount == 0) {
+    if (ip->packet_type == KLOAK_PACKET_TYPE_LIBINPUT) {
+      libinput_event_destroy(ip->data.libinput.li_event);
+    }
+    free(ip);
+  }
+}
+
 static void li_device_info_ref(struct li_device_info *ldi) {
   ldi->refcount += 1;
+  assert(ldi->refcount != 0);
 }
 
 static void li_device_info_unref(struct li_device_info *ldi) {
   ldi->refcount -= 1;
+  assert(ldi->refcount != UINT32_MAX);
   if (ldi->refcount == 0) {
-    /* The user data for a device is the struct we're freeing, so NULL out the
-     * user data for safety. */
+    /*
+     * The user data for a device is the struct we're freeing, so NULL out the
+     * user data for safety.
+     */
     libinput_device_set_user_data(ldi->device, NULL);
     free(ldi->device_name);
     free(ldi);
@@ -406,7 +428,7 @@ static void randname(char *buf, ssize_t len) {
     if (randchar < ALPHABET_LEN) {
       randchar += ASCII_UPPERCASE_START;
     } else {
-      randchar += ASCII_LOWERCASE_START;
+      randchar += (ASCII_LOWERCASE_START - ALPHABET_LEN);
     }
     buf[i] = randchar;
   }
@@ -640,6 +662,16 @@ static void recalc_global_space(struct disp_state *param_state) {
       || cur_geom_width < 0 || cur_geom_height < 0) {
       continue;
     }
+    if (cur_geom_x == 0 && cur_geom_y == 0 && cur_geom_width == 0
+      && cur_geom_height == 0) {
+      /*
+       * labwc will send two wl_output::done events for each display, once
+       * before we get position/size information from the XDG output protocol,
+       * and once after. We should ignore displays that don't yet have
+       * position/size information.
+       */
+      continue;
+    }
     screen_list[screen_list_len] = param_state->output_geometries[i];
     screen_list_len++;
     if (cur_geom_x < ul_corner_x) {
@@ -706,6 +738,15 @@ static void recalc_global_space(struct disp_state *param_state) {
   if (conn_screen_list_len != screen_list_len) {
     fprintf(stderr,
       "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
+    /*
+     * Debugging.
+     *
+     * fprintf(stderr, "Map of display geometries:\n");
+     * for (ssize_t z = 0; z < screen_list_len; z++) {
+     *   fprintf(stderr, "Screen %ld: x = %d, y = %d, width = %d, height = %d\n",
+     *     z, screen_list[z]->x, screen_list[z]->y, screen_list[z]->width, screen_list[z]->height);
+     * }
+     */
     exit(1);
   }
 
@@ -761,10 +802,12 @@ static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
     break;
   }
 
-  /* There is a possibility that out_data will contain all zeros; if this
+  /*
+   * There is a possibility that out_data will contain all zeros; if this
    * happens, it means that no output covered the requested coordinates in the
    * compositor's global space. That's a valid thing to tell a caller, so just
-   * return it anyway. */
+   * return it anyway.
+   */
   return out_data;
 }
 
@@ -794,6 +837,9 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
   cur_geom_height = state.output_geometries[output_idx]->height;
   if (cur_geom_x < 0 || cur_geom_y < 0 || cur_geom_width < 0
     || cur_geom_height < 0) {
+    return out_val;
+  }
+  if (x >= cur_geom_width || y >= cur_geom_height) {
     return out_val;
   }
 
@@ -904,6 +950,9 @@ static bool parse_uint31_arg(const char *val, int base, int32_t *out) {
   if (*val == '\0') {
     return false;
   }
+  if (*val == '-' || *val == '+' || isspace((unsigned char)(*val))) {
+    return false;
+  }
   errno = 0;
   val_int = strtoul(val, &val_endchar, base);
   if (errno == ERANGE) {
@@ -927,6 +976,9 @@ static bool parse_uint32_arg(const char *val, int base, uint32_t *out) {
     return false;
   }
   if (*val == '\0') {
+    return false;
+  }
+  if (*val == '-' || *val == '+' || isspace((unsigned char)(*val))) {
     return false;
   }
   errno = 0;
@@ -962,6 +1014,13 @@ static int32_t sleep_ms(int64_t ms) {
   return 0;
 }
 
+/*
+ * GCC issues a false-positive warning if the rslt_len check catches a -1
+ * return from vsnprintf. Why is not known, but the code is known to be
+ * good.
+ */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
 static char *sgenprintf(const char *str, ...) {
   char *rslt = NULL;
   int rslt_len = 0;
@@ -969,13 +1028,14 @@ static char *sgenprintf(const char *str, ...) {
   va_list extra_args;
 
   va_start(extra_args, str);
-  rslt_len = vsnprintf(NULL, 0, str, extra_args) + 1;
+  rslt_len = vsnprintf(NULL, 0, str, extra_args);
   va_end(extra_args);
-  if (rslt_len == -1) {
+  if (rslt_len <= -1) {
     fprintf(stderr,
       "FATAL ERROR: String processing issue: %s\n", strerror(errno));
     exit(1);
   }
+  rslt_len++; // for the terminating null byte
   rslt = safe_calloc(1, (size_t)(rslt_len));
   va_start(extra_args, str);
   rslt_writelen = vsnprintf(rslt, (size_t)(rslt_len), str, extra_args);
@@ -984,6 +1044,7 @@ static char *sgenprintf(const char *str, ...) {
   assert(rslt_writelen == rslt_len - 1);
   return rslt;
 }
+#pragma GCC diagnostic pop
 
 static uint32_t lookup_keycode(const char *name) {
   struct key_name_value *p = NULL;
@@ -1042,6 +1103,7 @@ static void attach_input_device(const char *dev_name) {
   ldi_node->caps_lock_held = false;
   ldi_node->last_led_state = 0;
   ldi_node->refcount = 1;
+  TAILQ_INIT(&ldi_node->trackq_head);
   libinput_device_set_user_data(new_device, ldi_node);
   LIST_INSERT_HEAD(&ldi_head, ldi_node, entries);
 }
@@ -1066,12 +1128,14 @@ static void detach_input_device(const char *dev_name) {
 
   dev = ldi_node->device;
   LIST_REMOVE(ldi_node, entries);
-  /* 'ldi_node' MUST be unreferenced first, then the contained device can be
+  /*
+   * 'ldi_node' MUST be unreferenced first, then the contained device can be
    * removed. li_device_info_unref() will null out the user data of 'dev'
    * before freeing 'ldi_node' if the reference count reaches 0, and libinput
    * is liable to free 'dev' if removing it causes its reference count to
    * reach 0. Thus reversing the below two lines would likely result in a
-   * use-after-free. */
+   * use-after-free.
+   */
   li_device_info_unref(ldi_node);
   libinput_path_remove_device(dev);
 }
@@ -1084,11 +1148,13 @@ static int32_t get_ticks_from_scroll_accum(double *accum_ptr) {
   if (fpclassify(scroll_accum) != FP_ZERO) {
     assert(isfinite(scroll_accum));
     scroll_ticks_d = scroll_accum / SCROLL_UNITS_PER_TICK_D;
-    /* We intentionally use SCROLL_UNITS_PER_TICK here, not
+    /*
+     * We intentionally use SCROLL_UNITS_PER_TICK here, not
      * SCROLL_UNITS_PER_TICK_D. The extra fraction of a scroll tick we would
      * gain from using SCROLL_UNITS_PER_TICK_D is not worthwhile, and having
      * the enforced threshold slightly lower than the real threshold is
-     * arguably safer. */
+     * arguably safer.
+     */
     assert(scroll_ticks_d <= (INT32_MAX / SCROLL_UNITS_PER_TICK));
     assert(scroll_ticks_d >= (INT32_MIN / SCROLL_UNITS_PER_TICK));
     scroll_ticks = (int32_t)(scroll_ticks_d);
@@ -1116,6 +1182,102 @@ static void wl_display_flush_safe(struct wl_display *display) {
   }
 }
 
+static void wl_init_new_display(struct disp_state *param_state,
+  ssize_t disp_idx) {
+  param_state->layers[disp_idx] = allocate_drawable_layer(param_state,
+    param_state->outputs[disp_idx]);
+  param_state->xdg_outputs[disp_idx] = zxdg_output_manager_v1_get_xdg_output(
+    param_state->xdg_output_manager, param_state->outputs[disp_idx]);
+  zxdg_output_v1_add_listener(param_state->xdg_outputs[disp_idx],
+    &xdg_output_listener, param_state);
+  wl_output_add_listener(param_state->outputs[disp_idx], &output_listener,
+    param_state);
+  param_state->pending_output_geometries[disp_idx] = safe_calloc(1,
+    sizeof(struct output_geometry));
+}
+
+static void display_sync_maybe(struct disp_state *param_state) {
+  bool should_sync_displays = true;
+  ssize_t i = 0;
+
+  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+    if (param_state->xdg_output_reconfig_flags[i]) {
+      should_sync_displays = false;
+      break;
+    }
+  }
+
+  if (!should_sync_displays) {
+    return;
+  }
+
+  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+    if (param_state->wl_output_remove_flags[i]) {
+      struct drawable_layer *layer = param_state->layers[i];
+
+      if (layer->layer_surface != NULL) {
+        assert(should_draw_cursor);
+        zwlr_layer_surface_v1_destroy(layer->layer_surface);
+      }
+      wl_output_release(param_state->outputs[i]);
+      param_state->outputs[i] = NULL;
+      param_state->output_names[i] = 0;
+      zxdg_output_v1_destroy(param_state->xdg_outputs[i]);
+      param_state->xdg_outputs[i] = NULL;
+      free(param_state->pending_output_geometries[i]);
+      param_state->pending_output_geometries[i] = NULL;
+      free(param_state->output_geometries[i]);
+      param_state->output_geometries[i] = NULL;
+      if (layer->surface != NULL) {
+        assert(should_draw_cursor);
+        wl_surface_destroy(layer->surface);
+      }
+      if (layer->pixbuf != NULL) {
+        assert(should_draw_cursor);
+        assert(layer->size >= 0);
+        munmap(layer->pixbuf,
+          (size_t)(layer->size) * MAX_UNRELEASED_FRAMES);
+      }
+      if (layer->shm_pool != NULL) {
+        assert(should_draw_cursor);
+        wl_shm_pool_destroy(layer->shm_pool);
+      }
+      free(layer);
+      param_state->layers[i] = NULL;
+      param_state->wl_output_remove_flags[i] = false;
+    } else {
+      struct output_geometry *geometry
+        = param_state->pending_output_geometries[i];
+      if (geometry == NULL) {
+        continue;
+      }
+      if (param_state->output_geometries[i] == NULL) {
+        param_state->output_geometries[i] = safe_calloc(1,
+          sizeof(struct output_geometry));
+      }
+      param_state->output_geometries[i]->x = geometry->x;
+      param_state->output_geometries[i]->y = geometry->y;
+      param_state->output_geometries[i]->width = geometry->width;
+      param_state->output_geometries[i]->height = geometry->height;
+    }
+  }
+
+  recalc_global_space(param_state);
+}
+
+static void queue_input_event(struct input_packet *ev_packet) {
+  int64_t current_time = 0;
+  int64_t lower_bound = 0;
+  int64_t random_delay = 0;
+
+  current_time = current_time_ms();
+  lower_bound = min(max(prev_release_time - current_time, 0), max_delay);
+  random_delay = random_between(lower_bound, max_delay);
+  ev_packet->sched_time = current_time + random_delay;
+  TAILQ_INSERT_TAIL(&evq_head, ev_packet, entries);
+  prev_release_time = ev_packet->sched_time;
+}
+
 /********************/
 /* wayland handling */
 /********************/
@@ -1131,7 +1293,8 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
       &wl_compositor_interface, 5);
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     if (!param_state->seat_set) {
-      param_state->seat = wl_registry_bind(registry, name, &wl_seat_interface, 9);
+      param_state->seat = wl_registry_bind(
+        registry, name, &wl_seat_interface, 9);
       param_state->seat_set = true;
     } else {
       fprintf(stderr,
@@ -1140,40 +1303,21 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
   } else if (strcmp(interface, wl_shm_interface.name) == 0) {
     param_state->shm = wl_registry_bind(registry, name, &wl_shm_interface, 2);
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
-    bool new_layer_allocated = false;
+    bool new_output_assigned = false;
 
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-      if (!param_state->layers[i]) {
+      if (!param_state->outputs[i]) {
         param_state->outputs[i] = wl_registry_bind(registry, name,
           &wl_output_interface, 4);
         param_state->output_names[i] = name;
-        param_state->layers[i] = allocate_drawable_layer(param_state, param_state->outputs[i]);
-        if (param_state->xdg_output_manager) {
-          /*
-           * We can only create xdg_outputs for wl_outputs if we've received
-           * the zxdg_output_manager_v1 object from the server, thus the 'if'
-           * condition here. When we *do* get the zxdg_output_manager_v1
-           * object, we go through and make xdg_outputs for any wl_outputs
-           * that were sent too early.
-           *
-           * NOTE: We do not add wl_output listeners until we have the
-           * zxdg_output_manager_v1 object to avoid the situation where we get
-           * wl_output_done signals before an xdg_output is created for a
-           * wl_output.
-           */
-          param_state->xdg_outputs[i] = zxdg_output_manager_v1_get_xdg_output(
-            param_state->xdg_output_manager, param_state->outputs[i]);
-          zxdg_output_v1_add_listener(param_state->xdg_outputs[i],
-            &xdg_output_listener, param_state);
-          wl_output_add_listener(param_state->outputs[i], &output_listener, param_state);
-          param_state->pending_output_geometries[i] = safe_calloc(1,
-            sizeof(struct output_geometry));
+        if (did_wayland_init) {
+          wl_init_new_display(param_state, i);
         }
-        new_layer_allocated = true;
+        new_output_assigned = true;
         break;
       }
     }
-    if (!new_layer_allocated) {
+    if (!new_output_assigned) {
       fprintf(stderr,
         "FATAL ERROR: Cannot handle more than %d displays attached at once!\n",
         MAX_SCREEN_COUNT);
@@ -1182,35 +1326,17 @@ static void registry_handle_global(void *data, struct wl_registry *registry,
   } else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
     param_state->xdg_output_manager = wl_registry_bind(registry, name,
       &zxdg_output_manager_v1_interface, 3);
-    for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-      if ((param_state->outputs[i]) && (!param_state->xdg_outputs[i])) {
-        /*
-         * This is where we make xdg_outputs for any wl_outputs that were
-         * sent too early.
-         */
-        param_state->xdg_outputs[i] = zxdg_output_manager_v1_get_xdg_output(
-          param_state->xdg_output_manager, param_state->outputs[i]);
-        zxdg_output_v1_add_listener(param_state->xdg_outputs[i],
-          &xdg_output_listener, param_state);
-        wl_output_add_listener(param_state->outputs[i], &output_listener, param_state);
-        param_state->pending_output_geometries[i] = safe_calloc(1,
-          sizeof(struct output_geometry));
-      }
-    }
   } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
     if (should_draw_cursor) {
       param_state->layer_shell = wl_registry_bind(registry, name,
         &zwlr_layer_shell_v1_interface, 4);
     }
-  } else if (
-    strcmp(interface, zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
+  } else if (strcmp(interface,
+    zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
     param_state->virt_pointer_manager = wl_registry_bind(registry, name,
       &zwlr_virtual_pointer_manager_v1_interface, 2);
-    param_state->virt_pointer
-      = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
-      param_state->virt_pointer_manager, NULL);
-  } else if (
-    strcmp(interface, zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
+  } else if (strcmp(interface,
+    zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
     param_state->virt_kb_manager = wl_registry_bind(registry, name,
       &zwp_virtual_keyboard_manager_v1_interface, 1);
   }
@@ -1220,40 +1346,27 @@ static void registry_handle_global_remove(void *data,
    __attribute__((unused)) struct wl_registry *registry,
   uint32_t name) {
   struct disp_state *param_state = data;
+  ssize_t i = 0;
 
-  for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (param_state->layers[i]) {
-      if (param_state->output_names[i] == name) {
-        struct drawable_layer *layer = param_state->layers[i];
-
-        if (layer->layer_surface != NULL) {
-          assert(should_draw_cursor);
-          zwlr_layer_surface_v1_destroy(layer->layer_surface);
-        }
+  if (did_wayland_init) {
+    for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+      if (param_state->layers[i] && param_state->output_names[i] == name) {
+        param_state->wl_output_remove_flags[i] = true;
+        display_sync_maybe(param_state);
+        break;
+      }
+    }
+  } else {
+    /*
+     * During early init, only outputs[i] and output_names[i] are set,
+     * everything else will be set once early init is done. We can free things
+     * immediately in this instance.
+     */
+    for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+      if (param_state->outputs[i] && param_state->output_names[i] == name) {
         wl_output_release(param_state->outputs[i]);
         param_state->outputs[i] = NULL;
         param_state->output_names[i] = 0;
-        zxdg_output_v1_destroy(param_state->xdg_outputs[i]);
-        param_state->xdg_outputs[i] = NULL;
-        free(param_state->pending_output_geometries[i]);
-        param_state->pending_output_geometries[i] = NULL;
-        param_state->output_geometries[i] = NULL;
-        if (layer->surface != NULL) {
-          assert(should_draw_cursor);
-          wl_surface_destroy(layer->surface);
-        }
-        if (layer->pixbuf != NULL) {
-          assert(should_draw_cursor);
-          assert(layer->size >= 0);
-          munmap(layer->pixbuf, (size_t)(layer->size));
-        }
-        if (layer->shm_pool != NULL) {
-          assert(should_draw_cursor);
-          wl_shm_pool_destroy(layer->shm_pool);
-        }
-        free(layer);
-        param_state->layers[i] = NULL;
-        recalc_global_space(param_state);
         break;
       }
     }
@@ -1287,6 +1400,7 @@ static void kb_handle_keymap(void *data,
   uint32_t format, int32_t fd, uint32_t size) {
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
+  struct stat kb_map_stat = {0};
 
   if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
     fprintf(stderr,
@@ -1296,6 +1410,19 @@ static void kb_handle_keymap(void *data,
   }
 
   assert(size <= INT32_MAX);
+
+  /* The compositor controls both `fd` and `size`. A `size` larger than the
+   * backing fd makes the reads below (memchr, and the later strcmp) touch pages
+   * past end-of-file and fault with SIGBUS, so reject a short fd here. */
+  if (fstat(fd, &kb_map_stat) != 0) {
+    fprintf(stderr, "FATAL ERROR: Could not stat xkb layout fd!\n");
+    exit(1);
+  }
+  if (kb_map_stat.st_size < (off_t)(size)) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor sent xkb keymap fd shorter than declared size!\n");
+    exit(1);
+  }
 
   kb_map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (kb_map_shm == MAP_FAILED) {
@@ -1318,7 +1445,8 @@ static void kb_handle_keymap(void *data,
       return;
     } else {
       assert(param_state->old_kb_map_shm_size >= 0);
-      munmap(param_state->old_kb_map_shm, (size_t)(param_state->old_kb_map_shm_size));
+      munmap(param_state->old_kb_map_shm,
+        (size_t)(param_state->old_kb_map_shm_size));
     }
   }
   zwp_virtual_keyboard_v1_keymap(param_state->virt_kb, format, fd, size);
@@ -1346,11 +1474,19 @@ static void kb_handle_keymap(void *data,
   param_state->virt_kb_keymap_set = true;
 }
 
+/*
+ * Note that the keys array MUST NOT be freed. Wayland clients are responsible
+ * for closing fds sent by the server
+ * (https://gitlab.freedesktop.org/wayland/wayland/-/work_items/184#note_696613),
+ * but the server is responsible for freeing arrays it allocated itself
+ * (https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/1e7baefe96606bc7beb7d60f6c69eb209ece832b/types/seat/wlr_seat_keyboard.c#L433-457).
+ */
 static void kb_handle_enter(__attribute__((unused)) void *data,
   __attribute__((unused)) struct wl_keyboard *kb,
   __attribute__((unused)) uint32_t serial,
-  __attribute__((unused)) struct wl_surface *surface, struct wl_array *keys) {
-  wl_array_release(keys);
+  __attribute__((unused)) struct wl_surface *surface,
+  __attribute__((unused)) struct wl_array *keys) {
+  ;
 }
 
 static void kb_handle_leave(__attribute__((unused)) void *data,
@@ -1439,19 +1575,16 @@ static void wl_output_handle_mode(__attribute__((unused)) void *data,
 
 static void wl_output_info_done(void *data, struct wl_output *output) {
   struct disp_state *param_state = data;
+  ssize_t i = 0;
 
-  for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
+  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (param_state->outputs[i] == output) {
-      struct output_geometry *geometry = param_state->pending_output_geometries[i];
-
-      if (geometry->x == 0 && geometry->y == 0 && geometry->width == 0
-        && geometry->height == 0)
-        return;
-      param_state->output_geometries[i] = geometry;
-      recalc_global_space(param_state);
+      param_state->xdg_output_reconfig_flags[i] = false;
       break;
     }
   }
+
+  display_sync_maybe(param_state);
 }
 
 static void wl_output_handle_scale(__attribute__((unused)) void *data,
@@ -1481,6 +1614,7 @@ static void xdg_output_handle_logical_position(void *data,
     if (param_state->xdg_outputs[i] == xdg_output) {
       param_state->pending_output_geometries[i]->x = x;
       param_state->pending_output_geometries[i]->y = y;
+      param_state->xdg_output_reconfig_flags[i] = true;
       break;
     }
   }
@@ -1495,6 +1629,7 @@ static void xdg_output_handle_logical_size(void *data,
     if (param_state->xdg_outputs[i] == xdg_output) {
       param_state->pending_output_geometries[i]->width = width;
       param_state->pending_output_geometries[i]->height = height;
+      param_state->xdg_output_reconfig_flags[i] = true;
       break;
     }
   }
@@ -1502,6 +1637,11 @@ static void xdg_output_handle_logical_size(void *data,
 
 static void xdg_output_info_done(__attribute__((unused)) void *data,
   __attribute__((unused)) struct zxdg_output_v1 *xdg_output) {
+  /*
+   * NOTE: This function is intentionally not used. Compositors no longer send
+   * xdg_output::done, and instead send wl_output::done. See:
+   * https://wayland.app/protocols/xdg-output-unstable-v1#zxdg_output_v1:event:done
+   */
   ;
 }
 
@@ -1533,6 +1673,24 @@ static void layer_surface_configure(void *data,
     if (param_state->layers[i]) {
       if (param_state->layers[i]->layer_surface == layer_surface) {
         layer = param_state->layers[i];
+        /*
+         * The layer might already be initialized (if, for instance, one of the
+         * screens was resized), so free any previously allocated resources.
+         */
+        if (layer->pixbuf != NULL) {
+          munmap(layer->pixbuf, (size_t)(layer->size) * MAX_UNRELEASED_FRAMES);
+          layer->pixbuf = NULL;
+        }
+        if (layer->shm_pool != NULL) {
+          /*
+           * This is safe even if some buffers in this pool haven't been freed
+           * yet, as "The mmapped memory will be released when all buffers that
+           * have been created from this pool are gone." See:
+           * https://wayland.app/protocols/wayland#wl_shm_pool:request:destroy
+           */
+          wl_shm_pool_destroy(layer->shm_pool);
+          layer->shm_pool = NULL;
+        }
         break;
       }
     }
@@ -1553,8 +1711,8 @@ static void layer_surface_configure(void *data,
       strerror(errno));
     exit(1);
   }
-  layer->pixbuf = mmap(NULL, (size_t)(layer->size * MAX_UNRELEASED_FRAMES), PROT_READ | PROT_WRITE,
-    MAP_SHARED, shm_fd, 0);
+  layer->pixbuf = mmap(NULL, (size_t)(layer->size * MAX_UNRELEASED_FRAMES),
+    PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if (layer->pixbuf == MAP_FAILED) {
     safe_close(shm_fd);
     fprintf(stderr,
@@ -1564,6 +1722,12 @@ static void layer_surface_configure(void *data,
   }
   layer->shm_pool = wl_shm_create_pool(param_state->shm, shm_fd,
     layer->size * MAX_UNRELEASED_FRAMES);
+  /*
+   * Both the client and the server have now mmap'd the file, and `man 2 mmap`
+   * states that "After the mmap() call has returned, the file descriptor, fd,
+   * can be closed immediately without invalidating the mapping."
+   */
+  safe_close(shm_fd);
 
   zeroed_region = wl_compositor_create_region(param_state->compositor);
   wl_region_add(zeroed_region, 0, 0, 0, 0);
@@ -1586,7 +1750,8 @@ static int li_open_restricted(const char *path, int flags,
 
   if (did_wayland_init) {
     if (ioctl(fd, EVIOCGRAB, &one) < 0) {
-      fprintf(stderr, "FATAL ERROR: Could not grab evdev device '%s'!\n", path);
+      fprintf(stderr,
+        "FATAL ERROR: Could not grab evdev device '%s'!\n", path);
       exit(1);
     }
   }
@@ -1611,9 +1776,15 @@ static void draw_frame(struct drawable_layer *layer) {
   ssize_t layer_idx = 0;
 
   assert(should_draw_cursor);
-
-  if (!layer->layer_surface_configured)
+  assert(cursor_x < INT32_MAX && cursor_x > INT32_MIN);
+  assert(cursor_y < INT32_MAX && cursor_y > INT32_MIN);
+  if (cursor_x < 0 || cursor_y < 0) {
     return;
+  }
+
+  if (!layer->layer_surface_configured) {
+    return;
+  }
 
   for (frame_idx = 0; frame_idx < MAX_UNRELEASED_FRAMES; frame_idx++) {
     if (!layer->frame_in_use[frame_idx]) {
@@ -1635,8 +1806,6 @@ static void draw_frame(struct drawable_layer *layer) {
     layer->size * chosen_frame_idx, layer->width, layer->height,
     layer->stride, WL_SHM_FORMAT_ARGB8888);
 
-  assert(cursor_x < INT32_MAX && cursor_x >= 0);
-  assert(cursor_y < INT32_MAX && cursor_y >= 0);
   scr_coord = abs_coord_to_screen_local_coord((int32_t)(cursor_x),
     (int32_t)(cursor_y));
 
@@ -1655,8 +1824,8 @@ static void draw_frame(struct drawable_layer *layer) {
     damage_surface_enh(layer->surface,
       layer->last_drawn_cursor_x - CURSOR_RADIUS,
       layer->last_drawn_cursor_y - CURSOR_RADIUS,
-      layer->last_drawn_cursor_x + CURSOR_RADIUS + 1,
-      layer->last_drawn_cursor_y + CURSOR_RADIUS + 1);
+      2 * CURSOR_RADIUS + 1,
+      2 * CURSOR_RADIUS + 1);
   }
   if (cursor_is_on_layer) {
     /* Draw crosshairs at the pointer location */
@@ -1664,8 +1833,8 @@ static void draw_frame(struct drawable_layer *layer) {
       scr_coord.x, scr_coord.y, layer->width, layer->height, CURSOR_RADIUS,
       true);
     damage_surface_enh(layer->surface, scr_coord.x - CURSOR_RADIUS,
-      scr_coord.y - CURSOR_RADIUS, scr_coord.x + CURSOR_RADIUS + 1,
-      scr_coord.y + CURSOR_RADIUS + 1);
+      scr_coord.y - CURSOR_RADIUS, 2 * CURSOR_RADIUS + 1,
+      2 * CURSOR_RADIUS + 1);
   }
 
   wl_buffer_add_listener(buffer, &buffer_listener, NULL);
@@ -1684,8 +1853,8 @@ static void draw_frame(struct drawable_layer *layer) {
   layer->frame_in_use[chosen_frame_idx] = true;
 }
 
-static struct drawable_layer *allocate_drawable_layer(struct disp_state *param_state,
-  struct wl_output *output) {
+static struct drawable_layer *allocate_drawable_layer(
+  struct disp_state *param_state, struct wl_output *output) {
   struct drawable_layer *layer = safe_calloc(1, sizeof(struct drawable_layer));
   ssize_t i = 0;
 
@@ -1748,16 +1917,18 @@ static struct input_packet * update_virtual_cursor(void) {
   struct input_packet *old_ev_packet = NULL;
   struct input_packet *ev_packet = NULL;
 
-  assert(prev_cursor_x < INT32_MAX && prev_cursor_x >= 0);
-  assert(prev_cursor_y < INT32_MAX && prev_cursor_y >= 0);
+  assert(prev_cursor_x < INT32_MAX && prev_cursor_x > INT32_MIN);
+  assert(prev_cursor_y < INT32_MAX && prev_cursor_y > INT32_MIN);
 
   prev_scr_coord = abs_coord_to_screen_local_coord((int32_t)(prev_cursor_x),
     (int32_t)(prev_cursor_y));
 
   if (!prev_scr_coord.valid || !state.layers[prev_scr_coord.output_idx]) {
-    /* We've somehow gotten into a spot where the previous coordinate data
+    /*
+     * We've somehow gotten into a spot where the previous coordinate data
      * either is invalid or points at an area where there is no screen. Reset
-     * everything in the hopes of recovering sanity. */
+     * everything in the hopes of recovering sanity.
+     */
     printf("Resetting!\n");
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
       if (state.layers[i]) {
@@ -1767,12 +1938,24 @@ static struct input_packet * update_virtual_cursor(void) {
         prev_cursor_y = sane_location.y;
         cursor_x = sane_location.x;
         cursor_y = sane_location.y;
-        assert(prev_cursor_x < INT32_MAX && prev_cursor_x >= 0);
-        assert(prev_cursor_y < INT32_MAX && prev_cursor_y >= 0);
+        assert(prev_cursor_x < INT32_MAX && prev_cursor_x > INT32_MIN);
+        assert(prev_cursor_y < INT32_MAX && prev_cursor_y > INT32_MIN);
         prev_scr_coord = abs_coord_to_screen_local_coord(
           (int32_t)(prev_cursor_x), (int32_t)(prev_cursor_y));
+        if (!prev_scr_coord.valid
+          || !state.layers[prev_scr_coord.output_idx]) {
+          /* This screen couldn't restore sanity, try the next one. */
+          continue;
+        }
         break;
       }
+    }
+    if (!prev_scr_coord.valid || !state.layers[prev_scr_coord.output_idx]) {
+      /*
+       * All attempts at making things sane failed, therefore bail out and
+       * don't create any new input_packet.
+       */
+      return NULL;
     }
   }
 
@@ -1895,6 +2078,8 @@ static struct input_packet * update_virtual_cursor(void) {
   scr_coord = abs_coord_to_screen_local_coord((int32_t)(cursor_x),
     (int32_t)(cursor_y));
 
+  assert(prev_scr_coord.valid);
+  assert(scr_coord.valid);
   if (should_draw_cursor) {
     state.layers[prev_scr_coord.output_idx]->frame_pending = true;
     state.layers[scr_coord.output_idx]->frame_pending = true;
@@ -1908,6 +2093,7 @@ static struct input_packet * update_virtual_cursor(void) {
     return NULL;
   } else {
     ev_packet = safe_calloc(1, sizeof(struct input_packet));
+    ev_packet->refcount = 1;
     ev_packet->packet_type = KLOAK_PACKET_TYPE_MOUSEMOVE;
     ev_packet->data.mousemove.cursor_x = (int32_t)(cursor_x);
     ev_packet->data.mousemove.cursor_y = (int32_t)(cursor_y);
@@ -1931,6 +2117,7 @@ static struct input_packet *update_mouse_scroll(void) {
       return NULL;
     } else {
       ev_packet = safe_calloc(1, sizeof(struct input_packet));
+      ev_packet->refcount = 1;
       ev_packet->packet_type = KLOAK_PACKET_TYPE_MOUSESCROLL;
       ev_packet->data.mousescroll.vert_scroll_ticks = vert_scroll_ticks;
       ev_packet->data.mousescroll.horiz_scroll_ticks = horiz_scroll_ticks;
@@ -1970,9 +2157,11 @@ static void handle_libinput_event(struct libinput_event *li_event,
     mouse_event_handled = true;
 
     if (button_state == LIBINPUT_BUTTON_STATE_PRESSED) {
-      /* Both libinput and zwlr_virtual_pointer_v1 use evdev event codes to
+      /*
+       * Both libinput and zwlr_virtual_pointer_v1 use evdev event codes to
        * identify the button pressed, so we can just pass the data from
-       * libinput straight through */
+       * libinput straight through.
+       */
       zwlr_virtual_pointer_v1_button(
         state.virt_pointer, ts_milliseconds, button_code,
         WL_POINTER_BUTTON_STATE_PRESSED);
@@ -1996,8 +2185,10 @@ static void handle_libinput_event(struct libinput_event *li_event,
       xkb_layout_index_t effective_group;
 
       if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
-        /* XKB keycodes == evdev keycodes + 8. Why this design decision was
-         * made, I have no idea. */
+        /*
+         * XKB keycodes == evdev keycodes + 8. Why this design decision was
+         * made, I have no idea.
+         */
         xkb_state_update_key(state.xkb_state, key + 8, XKB_KEY_DOWN);
       } else {
         xkb_state_update_key(state.xkb_state, key + 8, XKB_KEY_UP);
@@ -2015,10 +2206,12 @@ static void handle_libinput_event(struct libinput_event *li_event,
       zwp_virtual_keyboard_v1_key(state.virt_kb, ts_milliseconds, key,
         key_state);
 
-      /* Generally, X11 and Wayland turn an LED on after a key press, and
+      /*
+       * Generally, X11 and Wayland turn an LED on after a key press, and
        * off after a key release. The exact reason for this is unclear, but
        * we mimic that behavior here to make sure we don't trip any weird
-       * edge cases that depend on this. */
+       * edge cases that depend on this.
+       */
       if (key == KEY_NUMLOCK) {
         if (key_state == LIBINPUT_KEY_STATE_PRESSED
           && !ev_device_info->num_lock_held) {
@@ -2062,7 +2255,10 @@ static void handle_libinput_event(struct libinput_event *li_event,
   }
 
   li_device_info_unref(ev_device_info);
-  libinput_event_destroy(li_event);
+  /*
+   * The event is intentionally not destroyed here. It will be destroyed when
+   * the input_packet it is part of is freed.
+   */
 }
 
 static void register_esc_combo_event(struct libinput_event *li_event) {
@@ -2122,9 +2318,6 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
   double rel_y = 0.0;
   double vert_scroll_val = 0.0;
   double horiz_scroll_val = 0.0;
-  int64_t current_time = 0;
-  int64_t lower_bound = 0;
-  int64_t random_delay = 0;
 
   if (li_event_type == LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE) {
     pointer_event = libinput_event_get_pointer_event(li_event);
@@ -2286,18 +2479,214 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
   } else if ((li_event_type == LIBINPUT_EVENT_DEVICE_ADDED)
     || (li_event_type == LIBINPUT_EVENT_POINTER_BUTTON)
     || (li_event_type == LIBINPUT_EVENT_KEYBOARD_KEY)) {
-    ev_packet = safe_calloc(1, sizeof(struct input_packet));
-    if (ev_packet == NULL) {
-      fprintf(stderr,
-        "FATAL ERROR: Could not allocate memory for libinput event packet!\n");
-      exit(1);
+    struct libinput_event_pointer *pointer_button_event = NULL;
+    enum libinput_button_state button_state = LIBINPUT_BUTTON_STATE_RELEASED;
+    uint32_t button_held_count = 0;
+    struct libinput_event_keyboard *kb_event = NULL;
+    enum libinput_key_state key_state = LIBINPUT_KEY_STATE_RELEASED;
+    uint32_t key_held_count = 0;
+    struct input_packet *check_packet = NULL;
+    struct input_packet *next_check_packet = NULL;
+    enum libinput_event_type trackq_li_event_type = LIBINPUT_EVENT_NONE;
+
+    if (li_event_type == LIBINPUT_EVENT_POINTER_BUTTON) {
+      /*
+       * If this is a mousedown event, ignore it if there are multiple of the
+       * same button being held down across multiple devices. For mouseup,
+       * ignore the event if not all instances of the button have been
+       * released.
+       */
+      pointer_button_event = libinput_event_get_pointer_event(li_event);
+      button_state = libinput_event_pointer_get_button_state(
+        pointer_button_event);
+      button_held_count = libinput_event_pointer_get_seat_button_count(
+        pointer_button_event);
+      if (
+        (button_state == LIBINPUT_BUTTON_STATE_PRESSED
+          && button_held_count > 1)
+        || (button_state == LIBINPUT_BUTTON_STATE_RELEASED
+          && button_held_count > 0)
+      ) {
+        libinput_event_destroy(li_event);
+        return;
+      }
+    } else if (li_event_type == LIBINPUT_EVENT_KEYBOARD_KEY) {
+      /* Same logic as above, but for keys. */
+      kb_event = libinput_event_get_keyboard_event(li_event);
+      key_state = libinput_event_keyboard_get_key_state(kb_event);
+      key_held_count = libinput_event_keyboard_get_seat_key_count(kb_event);
+      if (
+        (key_state == LIBINPUT_KEY_STATE_PRESSED
+          && key_held_count > 1)
+        || (key_state == LIBINPUT_KEY_STATE_RELEASED
+          && key_held_count > 0)
+      ) {
+        libinput_event_destroy(li_event);
+        return;
+      }
     }
+
+    /* Build the event packet. */
+    ev_packet = safe_calloc(1, sizeof(struct input_packet));
+    ev_packet->refcount = 1;
     ev_packet->packet_type = KLOAK_PACKET_TYPE_LIBINPUT;
     ev_packet->data.libinput.li_event = li_event;
     ev_device = libinput_event_get_device(li_event);
     ev_device_info = libinput_device_get_user_data(ev_device);
     assert(ev_device_info != NULL);
     li_device_info_ref(ev_device_info);
+
+    /*
+     * Track button/key-down/up events so that we can handle device removal.
+     * When a press event is received, we add it to the tracking queue. When a
+     * release event is received, we find its corresponding press event and
+     * remove it if it exists.
+     */
+    if (li_event_type == LIBINPUT_EVENT_POINTER_BUTTON) {
+      if (button_state == LIBINPUT_BUTTON_STATE_PRESSED) {
+        input_packet_ref(ev_packet);
+        li_device_info_ref(ev_device_info);
+        TAILQ_INSERT_TAIL(&ev_device_info->trackq_head, ev_packet,
+          trackq_entries);
+      } else if (button_state == LIBINPUT_BUTTON_STATE_RELEASED) {
+        uint32_t released_button_code = libinput_event_pointer_get_button(
+          pointer_button_event);
+        struct libinput_event_pointer *pressed_li_event = NULL;
+        uint32_t pressed_button_code = 0;
+        check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
+
+        while (check_packet != NULL) {
+          next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
+          trackq_li_event_type = libinput_event_get_type(
+            check_packet->data.libinput.li_event);
+
+          if (trackq_li_event_type == LIBINPUT_EVENT_POINTER_BUTTON) {
+            pressed_li_event = libinput_event_get_pointer_event(
+              check_packet->data.libinput.li_event);
+            pressed_button_code = libinput_event_pointer_get_button(
+              pressed_li_event);
+
+            if (pressed_button_code == released_button_code) {
+              struct libinput_device *check_packet_device
+                = libinput_event_get_device(
+                  check_packet->data.libinput.li_event);
+              struct li_device_info *check_packet_device_info
+                = libinput_device_get_user_data(check_packet_device);
+              TAILQ_REMOVE(&ev_device_info->trackq_head, check_packet,
+                trackq_entries);
+              input_packet_unref(check_packet);
+              li_device_info_unref(check_packet_device_info);
+              break;
+            }
+          }
+          check_packet = next_check_packet;
+        }
+      }
+    } else if (li_event_type == LIBINPUT_EVENT_KEYBOARD_KEY) {
+      if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
+        input_packet_ref(ev_packet);
+        li_device_info_ref(ev_device_info);
+        TAILQ_INSERT_TAIL(&(ev_device_info->trackq_head), ev_packet,
+          trackq_entries);
+      } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
+        uint32_t released_key_code = libinput_event_keyboard_get_key(kb_event);
+        struct libinput_event_keyboard *pressed_li_event = NULL;
+        uint32_t pressed_key_code = 0;
+        check_packet = TAILQ_FIRST(&(ev_device_info->trackq_head));
+
+        while (check_packet != NULL) {
+          next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
+          trackq_li_event_type = libinput_event_get_type(
+            check_packet->data.libinput.li_event);
+
+          if (trackq_li_event_type == LIBINPUT_EVENT_KEYBOARD_KEY) {
+            pressed_li_event = libinput_event_get_keyboard_event(
+              check_packet->data.libinput.li_event);
+            pressed_key_code = libinput_event_keyboard_get_key(
+              pressed_li_event);
+
+            if (pressed_key_code == released_key_code) {
+              struct libinput_device *check_packet_device
+                = libinput_event_get_device(
+                  check_packet->data.libinput.li_event);
+              struct li_device_info *check_packet_device_info
+                = libinput_device_get_user_data(check_packet_device);
+              TAILQ_REMOVE(&ev_device_info->trackq_head, check_packet,
+                trackq_entries);
+              input_packet_unref(check_packet);
+              li_device_info_unref(check_packet_device_info);
+              break;
+            }
+          }
+          check_packet = next_check_packet;
+        }
+      }
+    }
+
+  /*
+   * Generate button-key/up events in the event queue for each event in a
+   * removed device's tracking queue. We don't have to worry about other
+   * devices with events that have to do with the same key, since there will
+   * only ever be one of any particular event "in flight" at the same time.
+   */
+  } else if (li_event_type == LIBINPUT_EVENT_DEVICE_REMOVED) {
+    struct input_packet *check_packet = NULL;
+    struct input_packet *next_check_packet = NULL;
+    enum libinput_event_type check_packet_type = LIBINPUT_EVENT_NONE;
+
+    ev_device = libinput_event_get_device(li_event);
+    ev_device_info = libinput_device_get_user_data(ev_device);
+    check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
+
+    while (check_packet != NULL) {
+      next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
+      ev_packet = safe_calloc(1, sizeof(struct input_packet));
+      ev_packet->refcount = 1;
+      ev_packet->packet_type = KLOAK_PACKET_TYPE_FAKE_LIBINPUT;
+      check_packet_type = libinput_event_get_type(
+        check_packet->data.libinput.li_event);
+      ev_packet->data.fake_libinput.event_type = check_packet_type;
+
+      if (check_packet_type == LIBINPUT_EVENT_POINTER_BUTTON) {
+        struct libinput_event_pointer *pressed_li_event
+          = libinput_event_get_pointer_event(
+            check_packet->data.libinput.li_event);
+        ev_packet->data.fake_libinput.button_state
+          = LIBINPUT_BUTTON_STATE_RELEASED;
+        ev_packet->data.fake_libinput.button_code
+          = libinput_event_pointer_get_button(pressed_li_event);
+
+      } else if (check_packet_type == LIBINPUT_EVENT_KEYBOARD_KEY) {
+        struct libinput_event_keyboard *pressed_li_event
+          = libinput_event_get_keyboard_event(
+            check_packet->data.libinput.li_event);
+        ev_packet->data.fake_libinput.key_state = LIBINPUT_KEY_STATE_RELEASED;
+        ev_packet->data.fake_libinput.button_code
+          = libinput_event_keyboard_get_key(pressed_li_event);
+      } else {
+        fprintf(stderr,
+          "FATAL ERROR: Unrecognized event type %ld found in device-specific tracking queue! Please report this bug!\n",
+          (int64_t)check_packet_type);
+        exit(1);
+      }
+
+      queue_input_event(ev_packet);
+
+      printf("Called!\n");
+      input_packet_unref(check_packet);
+      /*
+       * Each packet will hold a reference to this device's info, so we don't
+       * need to dig the device's info out of each event prior to freeing.
+       */
+      li_device_info_unref(ev_device_info);
+
+      check_packet = next_check_packet;
+    }
+
+    /* This event isn't useful to the event release code. */
+    libinput_event_destroy(li_event);
+    return;
+
   } else {
     /*
      * Other libinput events (like gestures) can't actually be passed through
@@ -2309,12 +2698,7 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     return;
   }
 
-  current_time = current_time_ms();
-  lower_bound = min(max(prev_release_time - current_time, 0), max_delay);
-  random_delay = random_between(lower_bound, max_delay);
-  ev_packet->sched_time = current_time + random_delay;
-  TAILQ_INSERT_TAIL(&evq_head, ev_packet, entries);
-  prev_release_time = ev_packet->sched_time;
+  queue_input_event(ev_packet);
 }
 
 static void release_scheduled_input_events(void) {
@@ -2396,8 +2780,32 @@ static void release_scheduled_input_events(void) {
       }
     }
     TAILQ_REMOVE(&evq_head, packet, entries);
-    free(packet);
+    input_packet_unref(packet);
   }
+}
+
+/* Only canonical evdev nodes (event<N>, N = decimal digits) are real input
+ * devices to grab; reject a bare "event" or an "event"-prefixed non-device
+ * name so a wrongly-named node is never attached. */
+static bool is_event_device_name(const char *name) {
+  size_t i = 0;
+  const size_t prefix_len = strlen("event");
+
+  if (name == NULL) {
+    return false;
+  }
+  if (strncmp(name, "event", prefix_len) != 0) {
+    return false;
+  }
+  if (name[prefix_len] == '\0') {
+    return false;
+  }
+  for (i = prefix_len; name[i] != '\0'; i++) {
+    if (name[i] < '0' || name[i] > '9') {
+      return false;
+    }
+  }
+  return true;
 }
 
 static void handle_inotify_events(void) {
@@ -2430,12 +2838,13 @@ static void handle_inotify_events(void) {
   while (true) {
     assert(rem_len >= (ssize_t)(sizeof(struct inotify_event)));
     assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
-    struct_len = ((ssize_t)(sizeof(struct inotify_event)) + (ssize_t)(ie->len));
+    struct_len = ((ssize_t)(sizeof(struct inotify_event))
+      + (ssize_t)(ie->len));
     assert(struct_len <= rem_len);
     rem_len -= struct_len;
     assert(rem_len >= 0);
 
-    if (strncmp(ie->name, "event", strlen("event") + 1) == 0) {
+    if (ie->len > 0 && is_event_device_name(ie->name)) {
       if (ie->mask & IN_CREATE) {
         attach_input_device(ie->name);
       } else {
@@ -2563,6 +2972,9 @@ static void applayer_random_init(void) {
 }
 
 static void applayer_wayland_init(void) {
+  const char *missing_obj_name = NULL;
+  ssize_t i = 0;
+
   /*
    * Technically we also initialize xkbcommon here, but it's only involved
    * because it's important for sending key events to Wayland.
@@ -2596,62 +3008,49 @@ static void applayer_wayland_init(void) {
     exit(1);
   }
   wl_registry_add_listener(state.registry, &registry_listener, &state);
-  wl_display_roundtrip(state.display);
+
+  for (ssize_t init_attempts = 0; init_attempts < MAX_INIT_ATTEMPTS;
+    init_attempts++) {
+    wl_display_roundtrip(state.display);
+    /* Check if we have all the objects we need for normal operation yet. */
+    missing_obj_name = NULL;
+    if (state.shm == NULL) {
+      missing_obj_name = "wl_shm";
+    } else if (state.compositor == NULL) {
+      missing_obj_name = "wl_compositor";
+    } else if (state.seat == NULL) {
+      missing_obj_name = "wl_seat";
+    } else if (state.xdg_output_manager == NULL) {
+      missing_obj_name = "zxdg_output_manager_v1";
+    } else if (should_draw_cursor && state.layer_shell == NULL) {
+      missing_obj_name = "zwlr_layer_shell_v1";
+    } else if (state.virt_pointer_manager == NULL) {
+      missing_obj_name = "zwlr_virtual_pointer_manager_v1";
+    } else if (state.virt_kb_manager == NULL) {
+      missing_obj_name = "zwp_virtual_keyboard_manager_v1";
+    }
+    if (missing_obj_name == NULL) {
+      break;
+    }
+  }
+  if (missing_obj_name != NULL) {
+    fprintf(stderr, "FATAL ERROR: No %s object from compositor!\n",
+      missing_obj_name);
+    exit(1);
+  }
 
   /*
-   * At this point, most of the Wayland state should be initialized and set
-   * up. Double-check it though, we don't know what Wayland compositor we're
-   * running on and we don't want to crash later because the compositor
-   * doesn't support a feature we need.
+   * Early init is done, set up things now that we have a good set of starting
+   * objects.
    */
-  if (state.shm == NULL) {
-    fprintf(stderr, "FATAL ERROR: No wl_shm object from compositor!\n");
-    exit(1);
-  }
-  if (state.compositor == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No wl_compositor object from compositor!\n");
-    exit(1);
-  }
-  if (state.seat == NULL) {
-    fprintf(stderr, "FATAL ERROR: No wl_seat object from compositor!\n");
-    exit(1);
-  }
-  if (state.outputs[0] == NULL) {
-    fprintf(stderr, "FATAL ERROR: No wl_output objects from compositor!\n");
-    exit(1);
-  }
-  if (state.xdg_output_manager == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zxdg_output_manager_v1 object from compositor!\n");
-    exit(1);
-  }
-  if (state.xdg_outputs[0] == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zxdg_output_v1 objects from compositor!\n");
-    exit(1);
-  }
-  if (should_draw_cursor && state.layer_shell == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zwlr_layer_shell_v1 object from compositor!\n");
-    exit(1);
-  }
-  if (state.virt_pointer_manager == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zwlr_virtual_pointer_manager_v1 object from compositor!\n");
-    exit(1);
-  }
-  if (state.virt_kb_manager == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zwp_virtual_keyboard_manager_v1 object from compositor!\n");
-    exit(1);
-  }
+  did_wayland_init = true;
+  state.virt_pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+    state.virt_pointer_manager, NULL);
   if (state.virt_pointer == NULL) {
     fprintf(stderr,
       "FATAL ERROR: No zwlr_virtual_pointer_v1 object from compositor!\n");
     exit(1);
   }
-
   state.virt_kb = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(
     state.virt_kb_manager, state.seat);
   /*
@@ -2665,25 +3064,30 @@ static void applayer_wayland_init(void) {
   if ((uintptr_t)(state.virt_kb)
     == (uintptr_t)(ZWP_VIRTUAL_KEYBOARD_MANAGER_V1_ERROR_UNAUTHORIZED)) {
     fprintf(stderr,
-      "Not authorized to create a virtual keyboard! Bailing out.\n");
+      "FATAL ERROR: Not authorized to create a virtual keyboard!\n");
     exit(1);
   }
-  wl_seat_add_listener(state.seat, &seat_listener, &state);
-
   state.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
   if (!state.xkb_ctx) {
     fprintf(stderr, "FATAL ERROR: Could not create XKB context!\n");
     exit(1);
   }
+  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+    if (state.outputs[i]) {
+      wl_init_new_display(&state, i);
+    }
+  }
 
-  /* Make sure any remaining allocations and similar have finished */
+  /*
+   * state.kb is set by the seat_handle_capabilities() function, which is part
+   * of the wl_seat listener.
+   */
+  wl_seat_add_listener(state.seat, &seat_listener, &state);
   wl_display_roundtrip(state.display);
   if (state.kb == NULL) {
     fprintf(stderr, "FATAL ERROR: No wl_keyboard object from compositor!\n");
     exit(1);
   }
-
-  did_wayland_init = true;
 }
 
 static void applayer_libinput_init(void) {
@@ -2701,7 +3105,7 @@ static void applayer_libinput_init(void) {
       continue;
     }
 
-    if (strncmp(input_dir_entry->d_name, "event", strlen("event")) != 0) {
+    if (!is_event_device_name(input_dir_entry->d_name)) {
       continue;
     }
 
@@ -2750,6 +3154,22 @@ static void applayer_poll_init(void) {
   }
 }
 
+static void check_dup_arg_and_mark(int opt, int *seen_opts,
+  ssize_t *seen_opts_pos_ptr) {
+  ssize_t i = 0;
+
+  for (i = 0; i < *seen_opts_pos_ptr; i++) {
+    if (seen_opts[i] == opt) {
+      fprintf(stderr,
+        "FATAL ERROR: Option '-%c' was specified multiple times!\n", opt);
+      exit(1);
+    }
+  }
+
+  seen_opts[*seen_opts_pos_ptr] = opt;
+  (*seen_opts_pos_ptr)++;
+}
+
 static void parse_cli_args(int argc, char **argv) {
   const char *optstring = "d:s:hc:k:n:";
   static struct option optarr[] = {
@@ -2761,7 +3181,14 @@ static void parse_cli_args(int argc, char **argv) {
     {"natural-scrolling", required_argument, NULL, 'n'},
     {0, 0, 0, 0}
   };
+  /*
+   * This must be incremented any time a new option is added above, and
+   * decremented when an option is removed.
+   */
+  const ssize_t opts_count = 6;
   int getopt_rslt = 0;
+  int *seen_opts = safe_calloc(opts_count, sizeof(int));
+  ssize_t seen_opts_pos = 0;
 
   while(true) {
     getopt_rslt = getopt_long(argc, argv, optstring, optarr, NULL);
@@ -2770,7 +3197,9 @@ static void parse_cli_args(int argc, char **argv) {
     } else if (getopt_rslt == '?') {
       print_usage();
       exit(1);
-    } else if (getopt_rslt == 'd') {
+    }
+    check_dup_arg_and_mark(getopt_rslt, seen_opts, &seen_opts_pos);
+    if (getopt_rslt == 'd') {
       if (!parse_uint31_arg(optarg, 10, &max_delay)) {
         fprintf(stderr,
           "FATAL ERROR: Invalid value '%s' passed to parameter 'delay'!",
@@ -2815,6 +3244,8 @@ static void parse_cli_args(int argc, char **argv) {
     }
   }
 
+  free(seen_opts);
+
   if (esc_key_list == NULL) {
     parse_esc_key_str(default_esc_key_str);
   }
@@ -2830,6 +3261,7 @@ static void parse_cli_args(int argc, char **argv) {
 int main(int argc, char **argv) {
   ssize_t i = 0;
   const char *env_val = NULL;
+  int poll_ret = 0;
 
   /*
    * BIG FAT WARNING: Do not attempt to build kloak with NDEBUG defined. Many
@@ -2880,7 +3312,12 @@ int main(int argc, char **argv) {
   if (did_wayland_init) {
     while (true) {
       while (wl_display_prepare_read(state.display) != 0) {
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       }
       wl_display_flush_safe(state.display);
 
@@ -2915,7 +3352,10 @@ int main(int argc, char **argv) {
       }
       wl_display_flush_safe(state.display);
 
-      if (poll(ev_fds, POLL_FD_COUNT, calc_poll_timeout()) == -1) {
+      do {
+        poll_ret = poll(ev_fds, POLL_FD_COUNT, calc_poll_timeout());
+      } while (poll_ret == -1 && errno == EINTR);
+      if (poll_ret == -1) {
         fprintf(stderr, "FATAL ERROR: 'poll' errored out: %s\n",
           strerror(errno));
         exit(1);
@@ -2928,7 +3368,12 @@ int main(int argc, char **argv) {
             strerror(errno));
           exit(1);
         }
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       } else {
         wl_display_cancel_read(state.display);
       }
@@ -2970,7 +3415,10 @@ int main(int argc, char **argv) {
         libinput_event_destroy(li_event);
       }
 
-      if (poll(ev_fds, POLL_FD_COUNT - 1, -1) == -1) {
+      do {
+        poll_ret = poll(ev_fds, POLL_FD_COUNT - 1, -1);
+      } while (poll_ret == -1 && errno == EINTR);
+      if (poll_ret == -1) {
         fprintf(stderr, "FATAL ERROR: 'poll' errored out: %s\n",
           strerror(errno));
         exit(1);
