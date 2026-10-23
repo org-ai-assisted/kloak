@@ -99,7 +99,11 @@ union input_packet_data {
  *   release unmodified at a later time.
  *
  * All kinds of events have a scheduled release time. An `entries` field is
- * included to allow buffered events to be stored in a tail queue.
+ * included to allow buffered events to be stored in a tail queue. A separate
+ * `trackq_entries` field links the same packet into a device's press-tracking
+ * queue: a press packet is on the main event queue and its device's tracking
+ * queue at the same time, and a single TAILQ_ENTRY link cannot be on two
+ * queues at once.
  *
  * The actual data of the input packet is in the `data` field. The fields of
  * `data` (mousemove, mousescroll, fake_libinput, libinput) correspond to the
@@ -112,6 +116,7 @@ struct input_packet {
   int64_t sched_time;
   uint32_t refcount;
   TAILQ_ENTRY(input_packet) entries;
+  TAILQ_ENTRY(input_packet) trackq_entries;
   union input_packet_data data;
 };
 

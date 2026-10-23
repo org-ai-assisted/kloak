@@ -2532,7 +2532,8 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
       if (button_state == LIBINPUT_BUTTON_STATE_PRESSED) {
         input_packet_ref(ev_packet);
         li_device_info_ref(ev_device_info);
-        TAILQ_INSERT_TAIL(&ev_device_info->trackq_head, ev_packet, entries);
+        TAILQ_INSERT_TAIL(&ev_device_info->trackq_head, ev_packet,
+          trackq_entries);
       } else if (button_state == LIBINPUT_BUTTON_STATE_RELEASED) {
         uint32_t released_button_code = libinput_event_pointer_get_button(
           pointer_button_event);
@@ -2541,7 +2542,7 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
         check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
 
         while (check_packet != NULL) {
-          next_check_packet = TAILQ_NEXT(check_packet, entries);
+          next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
           trackq_li_event_type = libinput_event_get_type(
             check_packet->data.libinput.li_event);
 
@@ -2557,18 +2558,10 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
                   check_packet->data.libinput.li_event);
               struct li_device_info *check_packet_device_info
                 = libinput_device_get_user_data(check_packet_device);
-              /* FIXME: This TAILQ_REMOVE call is silently failing for an unknown
-               * reason. This results in an assertion failure the second time a
-               * mouse button is released, and causes numerous use-after-free
-               * issues according to Valgrind. Uncomment the block of code
-               * a few lines below to verify. */
               TAILQ_REMOVE(&ev_device_info->trackq_head, check_packet,
-                entries);
+                trackq_entries);
               input_packet_unref(check_packet);
               li_device_info_unref(check_packet_device_info);
-              /*printf("Before: %lu\n", (uint64_t)check_packet);
-              check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
-              printf("After: %lu\n", (uint64_t)check_packet);*/
               break;
             }
           }
@@ -2579,7 +2572,8 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
       if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
         input_packet_ref(ev_packet);
         li_device_info_ref(ev_device_info);
-        TAILQ_INSERT_TAIL(&(ev_device_info->trackq_head), ev_packet, entries);
+        TAILQ_INSERT_TAIL(&(ev_device_info->trackq_head), ev_packet,
+          trackq_entries);
       } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
         uint32_t released_key_code = libinput_event_keyboard_get_key(kb_event);
         struct libinput_event_keyboard *pressed_li_event = NULL;
@@ -2587,7 +2581,7 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
         check_packet = TAILQ_FIRST(&(ev_device_info->trackq_head));
 
         while (check_packet != NULL) {
-          next_check_packet = TAILQ_NEXT(check_packet, entries);
+          next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
           trackq_li_event_type = libinput_event_get_type(
             check_packet->data.libinput.li_event);
 
@@ -2603,18 +2597,10 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
                   check_packet->data.libinput.li_event);
               struct li_device_info *check_packet_device_info
                 = libinput_device_get_user_data(check_packet_device);
-              /* FIXME: This TAILQ_REMOVE call is silently failing for an unknown
-               * reason. This results in an assertion failure the second time a
-               * key is released, and causes numerous use-after-free issues
-               * according to Valgrind. Uncomment the block of code a few lines
-               * below to verify. */
               TAILQ_REMOVE(&ev_device_info->trackq_head, check_packet,
-                entries);
+                trackq_entries);
               input_packet_unref(check_packet);
               li_device_info_unref(check_packet_device_info);
-              /*printf("Before: %lu\n", (uint64_t)check_packet);
-              check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
-              printf("After: %lu\n", (uint64_t)check_packet);*/
               break;
             }
           }
@@ -2639,7 +2625,7 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     check_packet = TAILQ_FIRST(&ev_device_info->trackq_head);
 
     while (check_packet != NULL) {
-      next_check_packet = TAILQ_NEXT(check_packet, entries);
+      next_check_packet = TAILQ_NEXT(check_packet, trackq_entries);
       ev_packet = safe_calloc(1, sizeof(struct input_packet));
       ev_packet->refcount = 1;
       ev_packet->packet_type = KLOAK_PACKET_TYPE_FAKE_LIBINPUT;
@@ -2672,7 +2658,6 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
 
       queue_input_event(ev_packet);
 
-      printf("Called!\n");
       input_packet_unref(check_packet);
       /*
        * Each packet will hold a reference to this device's info, so we don't
