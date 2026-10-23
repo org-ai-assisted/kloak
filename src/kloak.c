@@ -351,13 +351,11 @@ static void safe_closedir(DIR *dirp) {
 
 static void input_packet_ref(struct input_packet *ip) {
   ip->refcount += 1;
-  printf("Reffed %lu %u\n", (uint64_t)ip, ip->refcount);
   assert(ip->refcount != 0);
 }
 
 static void input_packet_unref(struct input_packet *ip) {
   ip->refcount -= 1;
-  printf("Unreffed %lu %u\n", (uint64_t)ip, ip->refcount);
   assert(ip->refcount != UINT32_MAX);
   if (ip->refcount == 0) {
     if (ip->packet_type == KLOAK_PACKET_TYPE_LIBINPUT) {
@@ -1400,6 +1398,7 @@ static void kb_handle_keymap(void *data,
   uint32_t format, int32_t fd, uint32_t size) {
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
+  struct stat kb_map_stat = {0};
 
   if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
     fprintf(stderr,
@@ -1409,6 +1408,19 @@ static void kb_handle_keymap(void *data,
   }
 
   assert(size <= INT32_MAX);
+
+  /* The compositor controls both `fd` and `size`. A `size` larger than the
+   * backing fd makes the reads below (memchr, and the later strcmp) touch pages
+   * past end-of-file and fault with SIGBUS, so reject a short fd here. */
+  if (fstat(fd, &kb_map_stat) != 0) {
+    fprintf(stderr, "FATAL ERROR: Could not stat xkb layout fd!\n");
+    exit(1);
+  }
+  if (kb_map_stat.st_size < (off_t)(size)) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor sent xkb keymap fd shorter than declared size!\n");
+    exit(1);
+  }
 
   kb_map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (kb_map_shm == MAP_FAILED) {
@@ -1915,7 +1927,6 @@ static struct input_packet * update_virtual_cursor(void) {
      * either is invalid or points at an area where there is no screen. Reset
      * everything in the hopes of recovering sanity.
      */
-    printf("Resetting!\n");
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
       if (state.layers[i]) {
         struct coord sane_location = screen_local_coord_to_abs_coord(0, 0, i);
@@ -2769,6 +2780,30 @@ static void release_scheduled_input_events(void) {
   }
 }
 
+/* Only canonical evdev nodes (event<N>, N = decimal digits) are real input
+ * devices to grab; reject a bare "event" or an "event"-prefixed non-device
+ * name so a wrongly-named node is never attached. */
+static bool is_event_device_name(const char *name) {
+  size_t i = 0;
+  const size_t prefix_len = strlen("event");
+
+  if (name == NULL) {
+    return false;
+  }
+  if (strncmp(name, "event", prefix_len) != 0) {
+    return false;
+  }
+  if (name[prefix_len] == '\0') {
+    return false;
+  }
+  for (i = prefix_len; name[i] != '\0'; i++) {
+    if (name[i] < '0' || name[i] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
 static void handle_inotify_events(void) {
   static char *read_buf = NULL;
   ssize_t read_len = 0;
@@ -2805,7 +2840,7 @@ static void handle_inotify_events(void) {
     rem_len -= struct_len;
     assert(rem_len >= 0);
 
-    if (ie->len > 0 && strncmp(ie->name, "event", strlen("event")) == 0) {
+    if (ie->len > 0 && is_event_device_name(ie->name)) {
       if (ie->mask & IN_CREATE) {
         attach_input_device(ie->name);
       } else {
@@ -3066,7 +3101,7 @@ static void applayer_libinput_init(void) {
       continue;
     }
 
-    if (strncmp(input_dir_entry->d_name, "event", strlen("event")) != 0) {
+    if (!is_event_device_name(input_dir_entry->d_name)) {
       continue;
     }
 
@@ -3273,7 +3308,12 @@ int main(int argc, char **argv) {
   if (did_wayland_init) {
     while (true) {
       while (wl_display_prepare_read(state.display) != 0) {
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       }
       wl_display_flush_safe(state.display);
 
@@ -3324,7 +3364,12 @@ int main(int argc, char **argv) {
             strerror(errno));
           exit(1);
         }
-        wl_display_dispatch_pending(state.display);
+        if (wl_display_dispatch_pending(state.display) == -1) {
+          fprintf(stderr,
+            "FATAL ERROR: Could not dispatch Wayland events: %s\n",
+            strerror(errno));
+          exit(1);
+        }
       } else {
         wl_display_cancel_read(state.display);
       }
