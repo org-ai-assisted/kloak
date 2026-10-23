@@ -351,11 +351,13 @@ static void safe_closedir(DIR *dirp) {
 
 static void input_packet_ref(struct input_packet *ip) {
   ip->refcount += 1;
+  printf("Reffed %lu %u\n", (uint64_t)ip, ip->refcount);
   assert(ip->refcount != 0);
 }
 
 static void input_packet_unref(struct input_packet *ip) {
   ip->refcount -= 1;
+  printf("Unreffed %lu %u\n", (uint64_t)ip, ip->refcount);
   assert(ip->refcount != UINT32_MAX);
   if (ip->refcount == 0) {
     if (ip->packet_type == KLOAK_PACKET_TYPE_LIBINPUT) {
@@ -1927,6 +1929,7 @@ static struct input_packet * update_virtual_cursor(void) {
      * either is invalid or points at an area where there is no screen. Reset
      * everything in the hopes of recovering sanity.
      */
+    printf("Resetting!\n");
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
       if (state.layers[i]) {
         struct coord sane_location = screen_local_coord_to_abs_coord(0, 0, i);
@@ -2669,6 +2672,7 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
 
       queue_input_event(ev_packet);
 
+      printf("Called!\n");
       input_packet_unref(check_packet);
       /*
        * Each packet will hold a reference to this device's info, so we don't
