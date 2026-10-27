@@ -358,7 +358,7 @@ static void safe_closedir(DIR *dirp) {
   }
 }
 
-int64_t timespec_to_ms(struct timespec spec) {
+static int64_t timespec_to_ms(struct timespec spec) {
   int64_t result = 0;
   assert(spec.tv_sec < INT64_MAX);
   assert(spec.tv_sec >= 0);
@@ -369,7 +369,7 @@ int64_t timespec_to_ms(struct timespec spec) {
   return result;
 }
 
-struct timespec ms_to_timespec(int64_t ms) {
+static struct timespec ms_to_timespec(int64_t ms) {
   struct timespec ts = { 0 };
   assert(ms >= 0);
   ts.tv_sec = (time_t)(ms / 1000);
@@ -1656,11 +1656,24 @@ static void layer_surface_configure(void *data,
   }
   assert(layer != NULL);
   if (width == 0) {
-    assert(geometry->width > 0);
+    if (geometry == NULL || geometry->width <= 0) {
+      /*
+       * No size hint from the compositor and no known screen size yet (a
+       * compositor bug). Degrade gracefully as documented above: ack the
+       * configure to stay protocol-correct, but skip drawing -- the cursor
+       * just won't be drawn here -- rather than aborting the whole daemon on
+       * untrusted compositor input.
+       */
+      zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
+      return;
+    }
     width = (uint32_t)(geometry->width);
   }
   if (height == 0) {
-    assert(geometry->height > 0);
+    if (geometry == NULL || geometry->height <= 0) {
+      zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
+      return;
+    }
     height = (uint32_t)(geometry->height);
   }
   assert(width <= INT32_MAX / 4);
@@ -2261,8 +2274,15 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
       if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
         active_esc_key_list[i]++;
       } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
-        active_esc_key_list[i]--;
-        assert(active_esc_key_list[i] >= 0);
+        /*
+         * A release can arrive with no press we observed (a combo key held
+         * down when the device was grabbed, or a device detached mid-press),
+         * so clamp at 0 rather than underflow and abort -- this counter is
+         * driven by untrusted external input.
+         */
+        if (active_esc_key_list[i] > 0) {
+          active_esc_key_list[i]--;
+        }
       } else {
         assert(false);
       }
@@ -2545,6 +2565,7 @@ static void release_scheduled_input_events(void) {
 
   while ((ev_packet = TAILQ_FIRST(&evq_head))
     && (current_time >= ev_packet->sched_time)) {
+    send_axis_source_and_frame = false;
     assert(ev_packet->sched_time >= 0);
     if (ev_packet->sched_time > UINT32_MAX) {
       fprintf(stderr,
