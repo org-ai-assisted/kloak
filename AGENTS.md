@@ -91,3 +91,36 @@ be either fixed or silenced, as appropriate.
 Comprehensive tests for this package are too high-volume for human review and
 live in the AI-maintained dist-ai repo, not here
 (https://github.com/org-ai-assisted/dist-ai).
+
+### Coverage is a standing obligation
+
+- Keep the dist-ai kloak unit tests (`kloak_harness.c`, `kloak_cbmc.c`)
+  exhaustive over kloak's testable logic, and the fuzz (`fuzz_*.c`) exhaustive
+  over its untrusted-input entry points: CLI args, compositor events and screen
+  geometry, libinput/inotify events, the keymap fd, scroll accumulation. A new
+  function or input path lands with its test/fuzz in the same change.
+
+## Settled -- do not re-litigate
+
+Maintainer decisions from the Whonix/kloak#24 audit. A reviewer re-raising one
+is a false positive; drop it. Standing: record every accepted maintainer
+decision (wontfix / by-design / out-of-scope) here when it is made, so it is
+not re-litigated.
+
+- Keymap short-fd SIGBUS / TOCTOU (compositor-declared `size` larger than the
+  keymap fd): WONTFIX. No code-execution path (nothing is read or written past
+  the mapping) and a hostile compositor already sees all input, so kloak cannot
+  defend against it. Do not re-add an fstat/pread guard.
+- Absolute pointer / touchscreen maps onto the whole global space: intended.
+  Only the coordinate-offset bug was a fix; per-output touch binding is out of
+  scope.
+- Fixed Wayland protocol versions: intended. A compositor offering a lower
+  version is unsupported and disconnecting is correct, not a `min(version, N)`
+  bug.
+- `draw_block` at (0, 0) and the axis vs axis_discrete angle handling: not bugs.
+  Zeroing the top-left block is valid; the scroll angle/discrete split is
+  deliberate (see the comment in
+  `queue_libinput_event_and_relocate_virtual_cursor`).
+- `LIBINPUT_EVENT_DEVICE_REMOVED` does not synthesize key/button releases: not
+  needed. libinput emits releases for held inputs when a device is removed; the
+  per-device tracking-queue approach was reverted as buggy and must not return.
