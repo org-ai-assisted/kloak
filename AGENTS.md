@@ -94,11 +94,23 @@ live in the AI-maintained dist-ai repo, not here
 
 ### Coverage is a standing obligation
 
-- Keep the dist-ai kloak unit tests (`kloak_harness.c`, `kloak_cbmc.c`)
-  exhaustive over kloak's testable logic, and the fuzz (`fuzz_*.c`) exhaustive
-  over its untrusted-input entry points: CLI args, compositor events and screen
-  geometry, libinput/inotify events, the keymap fd, scroll accumulation. A new
-  function or input path lands with its test/fuzz in the same change.
+- Keep the dist-ai kloak coverage exhaustive, and extend it in the same change
+  as any new function or input path:
+  - Formal verification (`kloak_cbmc.c`): CBMC-prove every pure/arithmetic
+    function UB-free (and its invariant where it has one) over kloak's operating
+    envelope. A bounded loop runs under `--unwind`; a loop bounded by
+    `MAX_SCREEN_COUNT` is covered exhaustively at `--unwind 129`.
+  - Unit tests (`kloak_harness.c`): concrete values and edges for the testable
+    logic.
+  - Fuzz (`fuzz_*.c`): the untrusted-input entry points -- CLI args, compositor
+    events and screen geometry, libinput/inotify events, the keymap fd, scroll
+    accumulation.
+- Out of CBMC scope (verify by unit/fuzz/review instead): the Wayland/libinput
+  callbacks and I/O wrappers, the unbounded cursor-glide loop
+  (`make_virtual_cursor_pos_sane` / `update_virtual_cursor`), and
+  `recalc_global_space` (its O(n^2) screen-connectivity scan over symbolic
+  geometry does not converge; unit-covered, and its per-pair
+  `check_screen_touch` component is proven).
 
 ## Settled -- do not re-litigate
 
