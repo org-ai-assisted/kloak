@@ -2248,22 +2248,11 @@ static void handle_libinput_event(struct libinput_event *li_event,
   libinput_event_destroy(li_event);
 }
 
-static void register_esc_combo_event(struct libinput_event *li_event) {
-  struct libinput_event_keyboard *kb_event = NULL;
-  uint32_t key = 0;
-  enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
-  enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
+static void register_esc_combo_key(uint32_t key,
+  enum libinput_key_state key_state) {
   size_t i = 0;
   size_t j = 0;
   bool hit_exit = true;
-
-  if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
-    return;
-  }
-
-  kb_event = libinput_event_get_keyboard_event(li_event);
-  key = libinput_event_keyboard_get_key(kb_event);
-  key_state = libinput_event_keyboard_get_key_state(kb_event);
 
   for (i = 0; i < esc_key_list_len; i++) {
     for (j = 0; j < esc_key_sublist_len[i]; j++) {
@@ -2300,6 +2289,22 @@ static void register_esc_combo_event(struct libinput_event *li_event) {
   if (hit_exit) {
     exit(0);
   }
+}
+
+static void register_esc_combo_event(struct libinput_event *li_event) {
+  struct libinput_event_keyboard *kb_event = NULL;
+  uint32_t key = 0;
+  enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
+  enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
+
+  if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
+    return;
+  }
+
+  kb_event = libinput_event_get_keyboard_event(li_event);
+  key = libinput_event_keyboard_get_key(kb_event);
+  key_state = libinput_event_keyboard_get_key_state(kb_event);
+  register_esc_combo_key(key, key_state);
 }
 
 static void queue_libinput_event_and_relocate_virtual_cursor(

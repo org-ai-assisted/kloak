@@ -572,6 +572,15 @@ static void handle_libinput_event(struct libinput_event *li_event,
   uint32_t ts_milliseconds);
 
 /*
+ * Updates the active-escape-key accounting for one key event and terminates
+ * kloak if all escape keys are actively being held down. Split out of
+ * register_esc_combo_event so the accounting (including the release-underflow
+ * clamp) is testable without a live libinput event.
+ */
+static void register_esc_combo_key(uint32_t key,
+  enum libinput_key_state key_state);
+
+/*
  * Tracks actively held down keys in the escape key list and terminates kloak
  * if all escape keys are actively being held down.
  */
