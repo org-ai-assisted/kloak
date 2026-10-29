@@ -431,6 +431,13 @@ static void wl_init_new_display(struct disp_state *param_state,
  */
 static void display_sync_maybe(struct disp_state *state);
 
+/*
+ * Forces the virtual cursor back within the bounds of compositor global space
+ * if it strays beyond it. Note that this function does NOT get the cursor
+ * certainly back on a screen.
+ */
+static bool clamp_cursor(void);
+
 /********************/
 /* wayland handling */
 /********************/
@@ -530,11 +537,12 @@ static void damage_surface_enh(struct wl_surface *surface, int32_t x,
   int32_t y, int32_t width, int32_t height);
 
 /*
- * Adjust cursor_x and cursor_y so that moving the cursor to it does not land
+ * Adjusts a cursor position so that moving the cursor to it does not land
  * in or jump over a void in compositor space, while leaving it as close as
  * possible to the original target location.
  */
-static void make_virtual_cursor_pos_sane(void);
+static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
+  double prev_cursor_y_pos, double *cursor_x_ptr, double *cursor_y_ptr);
 
 /*
  * Updates the virtual cursor's position based on the global cursor_x and
@@ -559,6 +567,13 @@ static void handle_pointer_button_event(uint32_t ts_milliseconds,
   uint32_t button_code, enum libinput_button_state button_state);
 
 /*
+ * Adjusts keyboard LED globals and returns an LED state that should be applied
+ * to all attached keyboards.
+ */
+static enum libinput_led calc_next_led_state(uint32_t key_code,
+  enum libinput_key_state key_state);
+
+/*
  * Processes a key press/release from a libinput event.
  */
 static void handle_key_event(uint32_t ts_milliseconds,
@@ -570,15 +585,6 @@ static void handle_key_event(uint32_t ts_milliseconds,
  */
 static void handle_libinput_event(struct libinput_event *li_event,
   uint32_t ts_milliseconds);
-
-/*
- * Updates the active-escape-key accounting for one key event and terminates
- * kloak if all escape keys are actively being held down. Split out of
- * register_esc_combo_event so the accounting (including the release-underflow
- * clamp) is testable without a live libinput event.
- */
-static void register_esc_combo_key(uint32_t key,
-  enum libinput_key_state key_state);
 
 /*
  * Tracks actively held down keys in the escape key list and terminates kloak
@@ -598,6 +604,14 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
  * them.
  */
 static void release_scheduled_input_events(void);
+
+/*
+ * Searches for an evdev device name in an inotify buffer and returns it.
+ * Advances buf_pos_ptr to record where it left off, sets buf_pos_ptr to -1 if
+ * an error is encountered.
+ */
+static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
+  ssize_t *buf_pos_ptr, bool *do_attach);
 
 /*
  * Reads inotify events for /dev/input and attempts to add or remove libinput

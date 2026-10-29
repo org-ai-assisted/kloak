@@ -1241,6 +1241,28 @@ static void display_sync_maybe(struct disp_state *param_state) {
   }
 }
 
+static bool clamp_cursor(void) {
+  bool did_clamp = false;
+
+  if (cursor_x < state.pointer_space_x) {
+    cursor_x = state.pointer_space_x;
+    did_clamp = true;
+  }
+  if (cursor_y < state.pointer_space_y) {
+    cursor_y = state.pointer_space_y;
+    did_clamp = true;
+  }
+  if (cursor_x > state.pointer_space_right_edge - 1) {
+    cursor_x = state.pointer_space_right_edge  - 1;
+    did_clamp = true;
+  }
+  if (cursor_y > state.pointer_space_bottom_edge - 1) {
+    cursor_y = state.pointer_space_bottom_edge - 1;
+    did_clamp = true;
+  }
+  return did_clamp;
+}
+
 /********************/
 /* wayland handling */
 /********************/
@@ -1655,22 +1677,17 @@ static void layer_surface_configure(void *data,
     }
   }
   assert(layer != NULL);
+  assert(geometry != NULL);
   if (width == 0) {
-    if (geometry == NULL || geometry->width <= 0) {
-      /*
-       * No size hint from the compositor and no known screen size yet (a
-       * compositor bug). Degrade gracefully as documented above: ack the
-       * configure to stay protocol-correct, but skip drawing -- the cursor
-       * just won't be drawn here -- rather than aborting the whole daemon on
-       * untrusted compositor input.
-       */
+    if (geometry->width <= 0) {
+      /* Skip this configure event, compositor hasn't given us enough info. */
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
     width = (uint32_t)(geometry->width);
   }
   if (height == 0) {
-    if (geometry == NULL || geometry->height <= 0) {
+    if (geometry->height <= 0) {
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
@@ -1895,7 +1912,8 @@ static void damage_surface_enh(struct wl_surface *surface, int32_t x,
   wl_surface_damage_buffer(surface, x, y, width, height);
 }
 
-static void make_virtual_cursor_pos_sane(void) {
+static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
+  double prev_cursor_y_pos, double *cursor_x_ptr, double *cursor_y_ptr) {
   /*
    * We can't just look at the intended final location of the cursor and move
    * it there if that location is valid, since that would allow jumping over
@@ -1927,12 +1945,12 @@ static void make_virtual_cursor_pos_sane(void) {
   struct coord trav_coord = { 0 };
   struct screen_local_coord trav_scr_coord = { 0 };
 
-  assert(cursor_x < INT32_MAX && cursor_x >= 0);
-  assert(cursor_y < INT32_MAX && cursor_y >= 0);
-  start.x = (int32_t)(prev_cursor_x);
-  start.y = (int32_t)(prev_cursor_y);
-  end.x = (int32_t)(cursor_x);
-  end.y = (int32_t)(cursor_y);
+  assert(*cursor_x_ptr < INT32_MAX && *cursor_x_ptr >= 0);
+  assert(*cursor_y_ptr < INT32_MAX && *cursor_y_ptr >= 0);
+  start.x = (int32_t)(prev_cursor_x_pos);
+  start.y = (int32_t)(prev_cursor_y_pos);
+  end.x = (int32_t)(*cursor_x_ptr);
+  end.y = (int32_t)(*cursor_y_ptr);
   prev_trav_coord = start;
   for (int32_t i = 1; ; i++) {
     trav_coord = traverse_line(start, end, i);
@@ -2001,8 +2019,8 @@ static void make_virtual_cursor_pos_sane(void) {
     }
     prev_trav_coord = trav_coord;
   }
-  cursor_x = end.x;
-  cursor_y = end.y;
+  *(cursor_x_ptr) = end.x;
+  *(cursor_y_ptr) = end.y;
 }
 
 static struct input_packet * update_virtual_cursor(void) {
@@ -2051,7 +2069,8 @@ static struct input_packet * update_virtual_cursor(void) {
     }
   }
 
-  make_virtual_cursor_pos_sane();
+  make_virtual_cursor_pos_sane(prev_cursor_x, prev_cursor_y, &cursor_x,
+    &cursor_y);
 
   assert(cursor_x < INT32_MAX && cursor_x >= 0);
   assert(cursor_y < INT32_MAX && cursor_y >= 0);
@@ -2127,37 +2146,9 @@ static void handle_pointer_button_event(uint32_t ts_milliseconds,
   zwlr_virtual_pointer_v1_frame(state.virt_pointer);
 }
 
-static void handle_key_event(uint32_t ts_milliseconds,
-  uint32_t key_code, enum libinput_key_state key_state) {
+static enum libinput_led calc_next_led_state(uint32_t key_code,
+  enum libinput_key_state key_state) {
   enum libinput_led led_state = 0;
-  xkb_mod_mask_t depressed_mods;
-  xkb_mod_mask_t latched_mods;
-  xkb_mod_mask_t locked_mods;
-  xkb_layout_index_t effective_group;
-
-  if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
-    /*
-     * XKB keycodes == evdev keycodes + 8. Why this design decision was
-     * made, I have no idea.
-     */
-    xkb_state_update_key(state.xkb_state, key_code + 8, XKB_KEY_DOWN);
-  } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
-    xkb_state_update_key(state.xkb_state, key_code + 8, XKB_KEY_UP);
-  } else {
-    assert(false);
-  }
-  depressed_mods = xkb_state_serialize_mods(
-    state.xkb_state, XKB_STATE_MODS_DEPRESSED);
-  latched_mods = xkb_state_serialize_mods(
-    state.xkb_state, XKB_STATE_MODS_LATCHED);
-  locked_mods = xkb_state_serialize_mods(
-    state.xkb_state, XKB_STATE_MODS_LOCKED);
-  effective_group = xkb_state_serialize_layout(
-    state.xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
-  zwp_virtual_keyboard_v1_modifiers(state.virt_kb, depressed_mods,
-    latched_mods, locked_mods, effective_group);
-  zwp_virtual_keyboard_v1_key(state.virt_kb, ts_milliseconds, key_code,
-    key_state);
 
   /*
    * Generally, X11 and Wayland turn an LED on after a key press, and
@@ -2196,6 +2187,43 @@ static void handle_key_event(uint32_t ts_milliseconds,
   if (caps_lock_state != 0) {
     led_state |= LIBINPUT_LED_CAPS_LOCK;
   }
+
+  return led_state;
+}
+
+static void handle_key_event(uint32_t ts_milliseconds,
+  uint32_t key_code, enum libinput_key_state key_state) {
+  enum libinput_led led_state = 0;
+  xkb_mod_mask_t depressed_mods;
+  xkb_mod_mask_t latched_mods;
+  xkb_mod_mask_t locked_mods;
+  xkb_layout_index_t effective_group;
+
+  if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
+    /*
+     * XKB keycodes == evdev keycodes + 8. Why this design decision was
+     * made, I have no idea.
+     */
+    xkb_state_update_key(state.xkb_state, key_code + 8, XKB_KEY_DOWN);
+  } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
+    xkb_state_update_key(state.xkb_state, key_code + 8, XKB_KEY_UP);
+  } else {
+    assert(false);
+  }
+  depressed_mods = xkb_state_serialize_mods(
+    state.xkb_state, XKB_STATE_MODS_DEPRESSED);
+  latched_mods = xkb_state_serialize_mods(
+    state.xkb_state, XKB_STATE_MODS_LATCHED);
+  locked_mods = xkb_state_serialize_mods(
+    state.xkb_state, XKB_STATE_MODS_LOCKED);
+  effective_group = xkb_state_serialize_layout(
+    state.xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
+  zwp_virtual_keyboard_v1_modifiers(state.virt_kb, depressed_mods,
+    latched_mods, locked_mods, effective_group);
+  zwp_virtual_keyboard_v1_key(state.virt_kb, ts_milliseconds, key_code,
+    key_state);
+
+  led_state = calc_next_led_state(key_code, key_state);
   if (led_state != last_led_state) {
     struct li_device_info *trav_li_device_info = NULL;
     last_led_state = led_state;
@@ -2248,11 +2276,22 @@ static void handle_libinput_event(struct libinput_event *li_event,
   libinput_event_destroy(li_event);
 }
 
-static void register_esc_combo_key(uint32_t key,
-  enum libinput_key_state key_state) {
+static void register_esc_combo_event(struct libinput_event *li_event) {
+  struct libinput_event_keyboard *kb_event = NULL;
+  uint32_t key = 0;
+  enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
+  enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
   size_t i = 0;
   size_t j = 0;
   bool hit_exit = true;
+
+  if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
+    return;
+  }
+
+  kb_event = libinput_event_get_keyboard_event(li_event);
+  key = libinput_event_keyboard_get_key(kb_event);
+  key_state = libinput_event_keyboard_get_key_state(kb_event);
 
   for (i = 0; i < esc_key_list_len; i++) {
     for (j = 0; j < esc_key_sublist_len[i]; j++) {
@@ -2263,14 +2302,11 @@ static void register_esc_combo_key(uint32_t key,
       if (key_state == LIBINPUT_KEY_STATE_PRESSED) {
         active_esc_key_list[i]++;
       } else if (key_state == LIBINPUT_KEY_STATE_RELEASED) {
-        /*
-         * A release can arrive with no press we observed (a combo key held
-         * down when the device was grabbed, or a device detached mid-press),
-         * so clamp at 0 rather than underflow and abort -- this counter is
-         * driven by untrusted external input.
-         */
-        if (active_esc_key_list[i] > 0) {
-          active_esc_key_list[i]--;
+        active_esc_key_list[i]--;
+        if (active_esc_key_list[i] < 0) {
+          fprintf(stderr,
+            "WARNING: Unexpected escape key release. If this didn't occur very soon after kloak startup, this is probably a kloak bug.\n");
+          active_esc_key_list[i] = 0;
         }
       } else {
         assert(false);
@@ -2289,22 +2325,6 @@ static void register_esc_combo_key(uint32_t key,
   if (hit_exit) {
     exit(0);
   }
-}
-
-static void register_esc_combo_event(struct libinput_event *li_event) {
-  struct libinput_event_keyboard *kb_event = NULL;
-  uint32_t key = 0;
-  enum libinput_key_state key_state = LIBINPUT_KEY_STATE_PRESSED;
-  enum libinput_event_type li_event_type = libinput_event_get_type(li_event);
-
-  if (li_event_type != LIBINPUT_EVENT_KEYBOARD_KEY) {
-    return;
-  }
-
-  kb_event = libinput_event_get_keyboard_event(li_event);
-  key = libinput_event_keyboard_get_key(kb_event);
-  key_state = libinput_event_keyboard_get_key_state(kb_event);
-  register_esc_combo_key(key, key_state);
 }
 
 static void queue_libinput_event_and_relocate_virtual_cursor(
@@ -2336,6 +2356,10 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     prev_cursor_y = cursor_y;
     cursor_x = abs_x + state.pointer_space_x;
     cursor_y = abs_y + state.pointer_space_y;
+    if (clamp_cursor()) {
+      fprintf(stderr,
+        "WARNING: Clamped cursor in response to an absolute positioning event, this usually should not happen.\n");
+    }
     ev_packet = update_virtual_cursor();
     libinput_event_destroy(li_event);
     if (!ev_packet) {
@@ -2350,12 +2374,11 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
     prev_cursor_y = cursor_y;
     cursor_x += rel_x;
     cursor_y += rel_y;
-    if (cursor_x < state.pointer_space_x) cursor_x = state.pointer_space_x;
-    if (cursor_y < state.pointer_space_y) cursor_y = state.pointer_space_y;
-    if (cursor_x > state.pointer_space_right_edge - 1)
-      cursor_x = state.pointer_space_right_edge  - 1;
-    if (cursor_y > state.pointer_space_bottom_edge - 1)
-      cursor_y = state.pointer_space_bottom_edge - 1;
+    /* We expect to need to clamp here. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
+    clamp_cursor();
+#pragma GCC diagnostic pop
     ev_packet = update_virtual_cursor();
     libinput_event_destroy(li_event);
     if (!ev_packet) {
@@ -2570,7 +2593,6 @@ static void release_scheduled_input_events(void) {
 
   while ((ev_packet = TAILQ_FIRST(&evq_head))
     && (current_time >= ev_packet->sched_time)) {
-    send_axis_source_and_frame = false;
     assert(ev_packet->sched_time >= 0);
     if (ev_packet->sched_time > UINT32_MAX) {
       fprintf(stderr,
@@ -2601,6 +2623,7 @@ static void release_scheduled_input_events(void) {
       break;
 
     case KLOAK_PACKET_TYPE_MOUSESCROLL:
+      send_axis_source_and_frame = false;
       if (ev_packet->data.mousescroll.vert_scroll_ticks != 0) {
         zwlr_virtual_pointer_v1_axis(state.virt_pointer,
           (uint32_t)(ev_packet->sched_time), WL_POINTER_AXIS_VERTICAL_SCROLL,
@@ -2639,12 +2662,76 @@ static void release_scheduled_input_events(void) {
   }
 }
 
+static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
+  ssize_t *buf_pos_ptr, bool *do_attach_ptr) {
+  /*
+   * Note that this function intentionally does not use assert() to make it
+   * easier to test.
+   */
+
+  ssize_t rem_len = buf_len - *buf_pos_ptr;
+  struct inotify_event *ie = (void *)(inotify_buf + *buf_pos_ptr);
+  ssize_t struct_len = 0;
+
+  if (rem_len < 0) {
+    *buf_pos_ptr = -1;
+    return NULL;
+  }
+
+  while (true) {
+    if (rem_len < (ssize_t)(sizeof(struct inotify_event))) {
+      *buf_pos_ptr = -1;
+      return NULL;
+    }
+    /* No need to check if ie->len fits in struct_len, uint32_t is too small */
+    struct_len = ((ssize_t)(sizeof(struct inotify_event))
+      + (ssize_t)(ie->len));
+    if (struct_len > rem_len) {
+      *buf_pos_ptr = -1;
+      return NULL;
+    }
+    rem_len -= struct_len;
+    if (rem_len < 0) {
+      *buf_pos_ptr = -1;
+      return NULL;
+    }
+    *(buf_pos_ptr) += struct_len;
+    if (ie->len > 0 && regexec(&evdev_reg, ie->name, 0, NULL, 0) == 0) {
+      if (ie->mask & IN_CREATE) {
+        *(do_attach_ptr) = true;
+      } else {
+        *(do_attach_ptr) = false;
+      }
+      return ie->name;
+    }
+
+    if (rem_len == 0) {
+      break;
+    }
+
+    /*
+     * We can safely disable cast alignment checks here because the kernel
+     * should only provide us properly aligned events. Quoting the manpage:
+     *
+     *     ...This filename is null-terminated, and may include further null
+     *     bytes ('\0') to align subsequent reads to a suitable address
+     *     boundary.
+     */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+    ie = (struct inotify_event *)((char *)(ie) + struct_len);
+#pragma GCC diagnostic pop
+  }
+
+  return NULL;
+}
+
 static void handle_inotify_events(void) {
   static char *read_buf = NULL;
   ssize_t read_len = 0;
-  ssize_t rem_len = 0;
-  ssize_t struct_len = 0;
-  struct inotify_event *ie;
+  ssize_t buf_pos = 0;
+  bool do_attach = false;
+  char *dev_path = NULL;
 
   if (read_buf == NULL) {
     read_buf = safe_calloc(INOTIFY_READ_BUF_LEN, sizeof(char));
@@ -2664,41 +2751,17 @@ static void handle_inotify_events(void) {
     break;
   }
 
-  ie = (void *)(read_buf);
-  rem_len = read_len;
-  while (true) {
-    assert(rem_len >= (ssize_t)(sizeof(struct inotify_event)));
-    assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
-    struct_len = ((ssize_t)(sizeof(struct inotify_event))
-      + (ssize_t)(ie->len));
-    assert(struct_len <= rem_len);
-    rem_len -= struct_len;
-    assert(rem_len >= 0);
-
-    if (ie->len > 0 && regexec(&evdev_reg, ie->name, 0, NULL, 0) == 0) {
-      if (ie->mask & IN_CREATE) {
-        attach_input_device(ie->name);
-      } else {
-        detach_input_device(ie->name);
-      }
+  while (buf_pos != read_len) {
+    dev_path = parse_inotify_events(read_buf, read_len, &buf_pos, &do_attach);
+    assert(buf_pos != -1);
+    if (dev_path == NULL) {
+      continue; /* we could use break too in theory */
     }
-
-    if (rem_len <= 0) {
-      break;
+    if (do_attach) {
+      attach_input_device(dev_path);
+    } else {
+      detach_input_device(dev_path);
     }
-
-    /*
-     * We can safely disable cast alignment checks here because the kernel
-     * should only provide us properly aligned events. Quoting the manpage:
-     *
-     *     ...This filename is null-terminated, and may include further null
-     *     bytes ('\0') to align subsequent reads to a suitable address
-     *     boundary.
-     */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-align"
-    ie = (struct inotify_event *)((char *)(ie) + struct_len);
-#pragma GCC diagnostic pop
   }
 }
 
