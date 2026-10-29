@@ -25,20 +25,12 @@
 /*******************/
 #define MAX_SCREEN_COUNT 128
 #define CURSOR_RADIUS 15
-#define POLL_TIMEOUT_MS 1
 #define DEFAULT_MAX_DELAY_MS 100
 #define DEFAULT_STARTUP_TIMEOUT_MS 500
 #define MAX_UNRELEASED_FRAMES 3
 #define POLL_FD_COUNT 3
 #define INOTIFY_READ_BUF_LEN 16384
-
-#ifndef min
-#define min(a, b) ( ((a) < (b)) ? (a) : (b) )
-#endif
-
-#ifndef max
-#define max(a, b) ( ((a) > (b)) ? (a) : (b) )
-#endif
+#define MAX_INIT_ATTEMPTS 8
 
 /*******************/
 /* core structures */
@@ -51,13 +43,8 @@
 struct li_device_info {
   struct libinput_device *device;
   char *device_name;
-  uint8_t num_lock_state;
-  bool num_lock_held;
-  uint8_t caps_lock_state;
-  bool caps_lock_held;
-  enum libinput_led last_led_state;
   uint32_t refcount;
-  LIST_ENTRY(li_device_info) entries;
+  LIST_ENTRY(li_device_info) ldi_entries;
 };
 
 /*
@@ -165,8 +152,7 @@ union input_packet_data {
  * - libinput events are raw events directly from libinput, intended for
  *   release unmodified at a later time.
  *
- * All kinds of events have a scheduled release time. An `entries` field is
- * included to allow buffered events to be stored in a tail queue.
+ * All kinds of events have a scheduled release time.
  *
  * The actual data of the input packet is in the `data` field. The fields of
  * `data` (mousemove, mousescroll, libinput) correspond to the
@@ -176,7 +162,7 @@ union input_packet_data {
 struct input_packet {
   enum input_packet_type packet_type;
   int64_t sched_time;
-  TAILQ_ENTRY(input_packet) entries;
+  TAILQ_ENTRY(input_packet) evq_entries;
   union input_packet_data data;
 };
 
@@ -198,12 +184,16 @@ struct disp_state {
   uint32_t output_names[MAX_SCREEN_COUNT];
   struct zxdg_output_manager_v1 *xdg_output_manager;
   struct zxdg_output_v1 *xdg_outputs[MAX_SCREEN_COUNT];
+  bool xdg_output_reconfig_flags[MAX_SCREEN_COUNT];
+  bool wl_output_remove_flags[MAX_SCREEN_COUNT];
   struct output_geometry *output_geometries[MAX_SCREEN_COUNT];
   struct output_geometry *pending_output_geometries[MAX_SCREEN_COUNT];
   int32_t global_space_width;
   int32_t global_space_height;
   int32_t pointer_space_x;
   int32_t pointer_space_y;
+  int32_t pointer_space_right_edge;
+  int32_t pointer_space_bottom_edge;
   struct zwlr_layer_shell_v1 *layer_shell;
   struct zwlr_virtual_pointer_manager_v1 *virt_pointer_manager;
   struct zwp_virtual_keyboard_manager_v1 *virt_kb_manager;
@@ -273,6 +263,16 @@ static DIR *safe_opendir(const char *name);
 static void safe_closedir(DIR *dirp);
 
 /*
+ * Converts a timespec to a millisecond count.
+ */
+static int64_t timespec_to_ms(struct timespec spec);
+
+/*
+ * Converts a millisecond count to a timespec.
+ */
+static struct timespec ms_to_timespec(int64_t ms);
+
+/*
  * Increments the reference count of an li_device_info struct.
  */
 static void li_device_info_ref(struct li_device_info *ldi);
@@ -311,12 +311,6 @@ static int64_t current_time_ms(void);
 static int64_t random_between(int64_t lower, int64_t upper);
 
 /*
- * Determine if a point falls inside an area.
- */
-static bool check_point_in_area(int32_t x, int32_t y, int32_t rect_x,
-  int32_t rect_y, int32_t rect_width, int32_t rect_height);
-
-/*
  * Determine if two screens are touching or overlapping given their
  * geometries.
  */
@@ -324,12 +318,11 @@ static bool check_screen_touch(struct output_geometry scr1,
   struct output_geometry scr2);
 
 /*
- * Calculates the size of the global compositor space and the location of the
- * upper-left corner of the pointer's coordinate space from the geometries of
- * the active displays. The function detects if there are gaps between the
- * displays and aborts the program if so.
+ * Checks screen continuity and calculates the size of the global compositor
+ * space and the location of the upper-left corner of the pointer's coordinate
+ * space. Returns true on success, false if there are gaps between displays.
  */
-static void recalc_global_space(struct disp_state *param_state);
+static bool recalc_global_space(struct disp_state *param_state);
 
 /*
  * Converts a set of coordinates in global compositor space to a set of
@@ -346,10 +339,10 @@ static struct coord screen_local_coord_to_abs_coord(int32_t x, int32_t y,
   int32_t output_idx);
 
 /*
- * Takes two points that define a line on a 2d plane, and walks the specified
- * number of pixels from the start point towards the "end" point. Note that
- * you *can* walk past the end point, and that the end point is NOT guaranteed
- * to be one of the values this function outputs.
+ * Takes two points that define a line on a 2d plane, and outputs the
+ * coordinate corresponding to the pixel that is 'pos' pixels away from the
+ * origin point. It is not possible to walk beyond the end coordinates, and the
+ * end coordiante will always be included in the output.
  */
 static struct coord traverse_line(struct coord start, struct coord end,
   int32_t pos);
@@ -415,6 +408,36 @@ static int32_t get_ticks_from_scroll_accum(double *accum_ptr);
  */
 static void wl_display_flush_safe(struct wl_display *display);
 
+/*
+ * Attempts to dispatch pending Wayland events, aborts the program on failure.
+ */
+static void wl_display_dispatch_pending_safe(struct wl_display *display);
+
+/*
+ * Same as above, but for wl_display_roundtrip.
+ */
+static void wl_display_roundtrip_safe(struct wl_display *display);
+
+/*
+ * Sets up structures, objects, and listeners for a newly attached display.
+ */
+static void wl_init_new_display(struct disp_state *param_state,
+  ssize_t disp_idx);
+
+/*
+ * Checks if a display state sync can be done. If so, commits pending geometry
+ * information, cleans up removed displays and their associated data, and
+ * recalculates global space.
+ */
+static void display_sync_maybe(struct disp_state *state);
+
+/*
+ * Forces the virtual cursor back within the bounds of compositor global space
+ * if it strays beyond it. Note that this function does NOT get the cursor
+ * certainly back on a screen.
+ */
+static bool clamp_cursor(void);
+
 /********************/
 /* wayland handling */
 /********************/
@@ -466,6 +489,8 @@ static void xdg_output_handle_description(void *data,
 static void layer_surface_configure(void *data,
   struct zwlr_layer_surface_v1 *layer_surface, uint32_t serial, uint32_t width,
   uint32_t height);
+static void layer_surface_closed(void *data,
+  struct zwlr_layer_surface_v1 *layer_surface);
 
 /*********************/
 /* libinput handling */
@@ -512,6 +537,14 @@ static void damage_surface_enh(struct wl_surface *surface, int32_t x,
   int32_t y, int32_t width, int32_t height);
 
 /*
+ * Adjusts a cursor position so that moving the cursor to it does not land
+ * in or jump over a void in compositor space, while leaving it as close as
+ * possible to the original target location.
+ */
+static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
+  double prev_cursor_y_pos, double *cursor_x_ptr, double *cursor_y_ptr);
+
+/*
  * Updates the virtual cursor's position based on the global cursor_x and
  * cursor_y variables. This will create a new mouse movement event if there
  * isn't one already queued, and update a queued mouse movement event to
@@ -526,6 +559,25 @@ static struct input_packet *update_virtual_cursor(void);
  * event to reflect the new scroll quantity otherwise.
  */
 static struct input_packet *update_mouse_scroll(void);
+
+/*
+ * Processes a button press/release from a libinput event.
+ */
+static void handle_pointer_button_event(uint32_t ts_milliseconds,
+  uint32_t button_code, enum libinput_button_state button_state);
+
+/*
+ * Adjusts keyboard LED globals and returns an LED state that should be applied
+ * to all attached keyboards.
+ */
+static enum libinput_led calc_next_led_state(uint32_t key_code,
+  enum libinput_key_state key_state);
+
+/*
+ * Processes a key press/release from a libinput event.
+ */
+static void handle_key_event(uint32_t ts_milliseconds,
+  uint32_t key_code, enum libinput_key_state key_state);
 
 /*
  * Processes a libinput event, sending emulated input to the compositor as
@@ -552,6 +604,14 @@ static void queue_libinput_event_and_relocate_virtual_cursor(
  * them.
  */
 static void release_scheduled_input_events(void);
+
+/*
+ * Searches for an evdev device name in an inotify buffer and returns it.
+ * Advances buf_pos_ptr to record where it left off, sets buf_pos_ptr to -1 if
+ * an error is encountered.
+ */
+static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
+  ssize_t *buf_pos_ptr, bool *do_attach);
 
 /*
  * Reads inotify events for /dev/input and attempts to add or remove libinput
@@ -585,6 +645,11 @@ static void print_usage(void);
 static void applayer_random_init(void);
 
 /*
+ * Compiles regexes.
+ */
+static void applayer_regex_init(void);
+
+/*
  * Connects to the wayland compositor and begins initialization of the Wayland
  * state.
  */
@@ -605,6 +670,13 @@ static void applayer_inotify_init(void);
  * Initializes the fd poll mechanism.
  */
 static void applayer_poll_init(void);
+
+/*
+ * Checks if an option has been specified twice. Terminates the program if so,
+ * marks the option as having been seen otherwise.
+ */
+static void check_dup_arg_and_mark(int opt, int *seen_opts,
+  ssize_t *seen_opts_pos_ptr);
 
 /*
  * Parses command-line arguments.
@@ -651,6 +723,7 @@ static const struct zxdg_output_v1_listener xdg_output_listener = {
 };
 static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
   .configure = layer_surface_configure,
+  .closed = layer_surface_closed,
 };
 
 /**********************/
