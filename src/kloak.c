@@ -14,11 +14,6 @@
  * - Use an assert to check that a value is within bounds before every cast.
  */
 
-/*
- * TODO: We might want to check if any floating-point numbers in the
- * application are infinity or NaN, and throw a fatal error if so.
- */
-
 #define _GNU_SOURCE
 
 #include <stdlib.h>
