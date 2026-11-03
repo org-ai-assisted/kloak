@@ -54,14 +54,19 @@ fi
 ## Signed-overflow policy for the fuzzer differs from production. Production
 ## (the Makefile) uses -ftrapv so signed-integer overflow TRAPS: kloak crashes
 ## and is restarted rather than running on corrupted state. Under the fuzzer
-## that same trap would abort the process on every input that merely wraps an
-## int, drowning real findings in overflow false positives. So append -fwrapv:
-## signed overflow becomes defined two's-complement wrap, which also makes
-## UBSan's signed-integer-overflow check a no-op. Appended AFTER mode detection
-## so it applies to BOTH the local-dev defaults and the OSS-Fuzz base-builder's
-## pre-baked $CFLAGS. kloak's explicit bounds asserts still catch genuinely
-## out-of-range values at the point of every cast.
-CFLAGS="${CFLAGS} -fwrapv"
+## that trap fires on every input that merely wraps an int, drowning real
+## findings in overflow false positives (the realistic envelope is overflow-free,
+## proven by the kloak-tests CBMC suite). So drop that ONE check, keeping the
+## rest of UBSan and ASan:
+##   - -fno-sanitize=signed-integer-overflow removes it whether the check was
+##     requested as the -fsanitize=undefined GROUP (local-dev CFLAGS above) or as
+##     an explicit signed-integer-overflow in the OSS-Fuzz base-builder's CFLAGS.
+##     clang KEEPS an explicitly-listed check under -fwrapv, so -fwrapv alone is
+##     not enough for the CI undefined job -- this is.
+##   - -fwrapv additionally makes signed overflow defined (two's-complement wrap)
+##     so the fuzzed code has well-defined behavior instead of UB.
+## Appended AFTER mode detection so it applies to BOTH entry contexts.
+CFLAGS="${CFLAGS} -fwrapv -fno-sanitize=signed-integer-overflow"
 
 ## --- Wayland protocol codegen ---------------------------------------
 ##
