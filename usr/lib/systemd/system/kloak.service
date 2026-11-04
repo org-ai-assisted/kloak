@@ -37,7 +37,11 @@ ExecStart=/usr/bin/kloak
 Restart=always
 RestartSec=2s
 
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG CAP_SYS_PTRACE
+## dac_override alone: to traverse the user-owned /run/user/<uid> to the Wayland
+## socket and to open /dev/input/event*. The Wayland implementation needs no other
+## capability -- matches AppArmor usr.bin.kloak (grants only dac_override), verified
+## by running the full grab+inject path under that confinement with zero denials.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
 
 ProtectSystem=strict
 #ProtectHome=true
