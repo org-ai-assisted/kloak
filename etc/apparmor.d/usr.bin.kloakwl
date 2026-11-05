@@ -23,6 +23,8 @@ include <tunables/global>
   capability sys_chroot,
   capability setuid,
   capability setgid,
+  ## As root (pre-uid-drop), traverse the user-owned /run/user/<uid> to the socket.
+  capability dac_override,
   mount,
   umount,
   pivot_root,
@@ -41,10 +43,11 @@ include <tunables/global>
   /etc/passwd r,
   /etc/group r,
 
-  ## Unprivileged user-namespace id mapping.
-  @{PROC}/self/uid_map rw,
-  @{PROC}/self/gid_map rw,
-  @{PROC}/self/setgroups rw,
+  ## Unprivileged user-namespace id mapping. AppArmor mediates the resolved
+  ## numeric-pid path, not the /proc/self magic symlink, so match @{pid}.
+  @{PROC}/@{pid}/uid_map rw,
+  @{PROC}/@{pid}/gid_map rw,
+  @{PROC}/@{pid}/setgroups rw,
   @{PROC}/ r,
   @{PROC}/** r,
 
@@ -56,6 +59,11 @@ include <tunables/global>
   ## Wayland socket, connected before pivot_root.
   /run/user/*/ r,
   /run/user/*/wayland-* rw,
+
+  ## Private tmpfs sandbox root built before pivot_root (the safe_mkdir_p tree).
+  /tmp/ rw,
+  /tmp/usr/ rw,
+  /tmp/usr/** rw,
 
   ## xkb keymap: read, then bind-mounted into the sandbox root.
   /usr/share/X11/xkb/ r,

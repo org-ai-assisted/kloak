@@ -37,11 +37,12 @@ ExecStart=/usr/bin/kloak
 Restart=always
 RestartSec=2s
 
-## dac_override alone: to traverse the user-owned /run/user/<uid> to the Wayland
-## socket and to open /dev/input/event*. The Wayland implementation needs no other
-## capability -- matches AppArmor usr.bin.kloak (grants only dac_override), verified
-## by running the full grab+inject path under that confinement with zero denials.
-CapabilityBoundingSet=CAP_DAC_OVERRIDE
+## dac_override: traverse the user-owned /run/user/<uid> + open /dev/input/event*.
+## setuid/setgid: kloakwl drops to an unprivileged uid before it unshares. No
+## sys_admin/sys_chroot: kloakwl's mount/pivot_root run inside its own new user
+## namespace, which grants a full capability set there. AppArmor usr.bin.kloak
+## still confines kloak itself to dac_override.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 ProtectSystem=strict
 #ProtectHome=true
@@ -56,7 +57,11 @@ PrivateTmp=true
 #PrivateUsers=true
 PrivateNetwork=true
 MemoryDenyWriteExecute=true
-NoNewPrivileges=true
+## kloakwl runs under a SEPARATE, broader AppArmor profile (Px) to build its own
+## sandbox (userns/mount/pivot_root); no_new_privs forbids an exec transition to a
+## non-subset profile, so it is off here. The SystemCallFilter below still installs
+## (the root executor holds CAP_SYS_ADMIN) and is inherited across the exec by kloakwl.
+NoNewPrivileges=false
 RestrictRealtime=true
 ## kloak fork+execve's a sandboxed kloakwl Wayland adapter that builds its own
 ## nested sandbox (user+mnt+net+ipc+pid+uts+cgroup namespaces, then pivot_root,
