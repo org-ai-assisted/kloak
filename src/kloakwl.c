@@ -666,6 +666,7 @@ static void kb_handle_keymap(void *data,
   uint32_t format, int32_t fd, uint32_t size) {
   struct disp_state *param_state = data;
   char *kb_map_shm = NULL;
+  struct stat kb_map_stat = {0};
 
   if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
     fprintf(stderr,
@@ -675,6 +676,19 @@ static void kb_handle_keymap(void *data,
   }
 
   assert(size <= INT32_MAX);
+
+  /* The compositor controls both `fd` and `size`. A `size` larger than the
+   * backing fd makes the reads below (memchr, and the later strcmp) touch pages
+   * past end-of-file and fault with SIGBUS, so reject a short fd here. */
+  if (fstat(fd, &kb_map_stat) != 0) {
+    fprintf(stderr, "FATAL ERROR: Could not stat xkb layout fd!\n");
+    exit(1);
+  }
+  if (kb_map_stat.st_size < (off_t)(size)) {
+    fprintf(stderr,
+      "FATAL ERROR: Compositor sent xkb keymap fd shorter than declared size!\n");
+    exit(1);
+  }
 
   kb_map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (kb_map_shm == MAP_FAILED) {
