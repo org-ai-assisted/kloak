@@ -945,8 +945,8 @@ static void layer_surface_configure(void *data,
   layer->size = layer->stride * layer->height;
   assert(layer->size >= 0);
   assert(layer->size <= INT32_MAX / MAX_UNRELEASED_FRAMES);
-  shm_fd = create_memfd_file(layer->size * MAX_UNRELEASED_FRAMES);
-  layer->pixbuf = mmap(NULL, (size_t)(layer->size * MAX_UNRELEASED_FRAMES),
+  shm_fd = create_memfd_file((ssize_t)(layer->size) * MAX_UNRELEASED_FRAMES);
+  layer->pixbuf = mmap(NULL, (size_t)(layer->size) * MAX_UNRELEASED_FRAMES,
     PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if (layer->pixbuf == MAP_FAILED) {
     safe_close(shm_fd);
@@ -1083,7 +1083,10 @@ static int open_wl_sock(void) {
     exit(1);
   }
   wl_sockaddr.sun_family = AF_UNIX;
-  strcpy(wl_sockaddr.sun_path, wl_sock_path);
+  /* Length already validated above; snprintf bounds the copy by the destination
+   * size regardless, so a tainted path can never overflow sun_path. */
+  snprintf(wl_sockaddr.sun_path, sizeof(wl_sockaddr.sun_path), "%s",
+    wl_sock_path);
 
   connect_success = connect(wl_sock_fd,
     (const struct sockaddr *)(&wl_sockaddr), sizeof(wl_sockaddr));
@@ -1857,7 +1860,7 @@ static bool process_parent_message(void) {
 
   default:
     fprintf(stderr, "FATAL ERROR: Unexpected message type %u from parent!\n",
-      msg_type);
+      (unsigned int)msg_type);
     exit(1);
   }
 
@@ -2046,7 +2049,7 @@ static void applayer_config_init(void) {
 
     default:
       fprintf(stderr, "FATAL ERROR: Unexpected message type %u from parent!\n",
-        msg_type);
+        (unsigned int)msg_type);
       exit(1);
     }
 

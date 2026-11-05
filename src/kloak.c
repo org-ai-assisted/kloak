@@ -996,7 +996,7 @@ static void process_child_message(void) {
     return;
   default:
     fprintf(stderr, "FATAL ERROR: Unexpected message type %u from child!\n",
-      msg_type);
+      (unsigned int)msg_type);
     exit(1);
   }
 }
