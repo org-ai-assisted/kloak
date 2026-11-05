@@ -1,0 +1,7 @@
+## Copyright (C) 2025 - 2025 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+## See the file COPYING for copying conditions.
+
+## kloakwl drops to this unprivileged system user (and matching group) inside its
+## in-process sandbox; it maps uid/gid 0 in its user namespace to this id. kloakwl
+## FATALs if the user or group is absent, so it must exist before the service runs.
+u kloakwl - "kloak Wayland adapter" /nonexistent /usr/sbin/nologin
