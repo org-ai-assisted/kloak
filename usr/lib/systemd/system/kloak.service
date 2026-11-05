@@ -60,7 +60,7 @@ NoNewPrivileges=true
 RestrictRealtime=true
 RestrictNamespaces=true
 SystemCallArchitectures=native
-SystemCallFilter=brk open poll close ioctl mmap munmap read pread64 getdents64 socket connect getsockopt epoll_create1 epoll_ctl rt_sigprocmask epoll_wait inotify_init1 access openat fstat prctl sendmsg recvmsg newfstatat unlink ftruncate fcntl timerfd_create statx readlinkat faccessat faccessat2 fstatfs inotify_add_watch timerfd_settime madvise sigaltstack rt_sigaction
+SystemCallFilter=brk open poll ppoll close ioctl mmap munmap read pread64 getdents64 socket connect getsockopt epoll_create1 epoll_ctl rt_sigprocmask epoll_wait epoll_pwait inotify_init1 access openat fstat prctl sendmsg recvmsg newfstatat unlink unlinkat ftruncate fcntl timerfd_create statx readlinkat faccessat faccessat2 fstatfs inotify_add_watch timerfd_settime madvise sigaltstack rt_sigaction
 
 [Install]
 WantedBy=graphical.target
