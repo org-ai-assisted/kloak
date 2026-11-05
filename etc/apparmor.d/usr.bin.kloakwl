@@ -1,0 +1,63 @@
+include <tunables/global>
+
+## Copyright (C) 2012 - 2025 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+## See the file COPYING for copying conditions.
+
+## kloakwl is the sandboxed Wayland adapter that /usr/bin/kloak fork+execve's.
+## It connects to the Wayland compositor, then builds its own in-process sandbox:
+## an unprivileged user namespace plus mnt/net/ipc/pid/uts/cgroup namespaces,
+## pivot_root into an empty tmpfs root, drop of all capabilities, and a drop to
+## the unprivileged kloakwl uid/gid. AppArmor mediates the namespace, mount and
+## capability operations even inside the new user namespace, so they are granted
+## here; everything else is the minimal pre-sandbox access it needs.
+
+/usr/bin/kloakwl flags=(attach_disconnected) {
+  include <local/usr.bin.kloakwl>
+
+  ## Wayland client socket, connected before the sandbox is entered.
+  network unix stream,
+
+  ## In-process sandbox construction.
+  userns,
+  capability sys_admin,
+  capability sys_chroot,
+  capability setuid,
+  capability setgid,
+  mount,
+  umount,
+  pivot_root,
+
+  signal receive set=cont peer=unconfined,
+  signal receive set=kill peer=unconfined,
+  signal receive set=term peer=unconfined,
+
+  /etc/ld.so.cache r,
+  /etc/ld.so.preload r,
+  /usr/bin/kloakwl mr,
+  /{,usr/}lib{,32,64}/** mr,
+
+  ## Resolve the unprivileged kloakwl user/group it drops to.
+  /etc/nsswitch.conf r,
+  /etc/passwd r,
+  /etc/group r,
+
+  ## Unprivileged user-namespace id mapping.
+  @{PROC}/self/uid_map rw,
+  @{PROC}/self/gid_map rw,
+  @{PROC}/self/setgroups rw,
+  @{PROC}/ r,
+  @{PROC}/** r,
+
+  /dev/urandom r,
+  /dev/null rw,
+  /dev/zero rw,
+  /dev/shm/* mrw,
+
+  ## Wayland socket, connected before pivot_root.
+  /run/user/*/ r,
+  /run/user/*/wayland-* rw,
+
+  ## xkb keymap: read, then bind-mounted into the sandbox root.
+  /usr/share/X11/xkb/ r,
+  /usr/share/X11/xkb/** r,
+}
