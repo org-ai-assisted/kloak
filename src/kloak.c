@@ -636,12 +636,18 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
     if (ie->len > 0 && regexec(&evdev_reg, ie->name, 0, NULL, 0) == 0) {
       if (ie->mask & IN_CREATE) {
         *do_attach_ptr = true;
-      } else if (ie->mask & IN_DELETE) {
-        *do_attach_ptr = false;
-      } else {
-        assert(false);
+        return ie->name;
       }
-      return ie->name;
+      if (ie->mask & IN_DELETE) {
+        *do_attach_ptr = false;
+        return ie->name;
+      }
+      /*
+       * A matching event<N> node carrying neither IN_CREATE nor IN_DELETE is
+       * not an attach or a detach, so skip it rather than forcing either. This
+       * function is assert-free by contract (a fuzz seam fed untrusted buffers),
+       * so it must not abort on such a record.
+       */
     }
 
     if (rem_len == 0) {
