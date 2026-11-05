@@ -2457,6 +2457,11 @@ static void applayer_poll_init(void) {
 /**********/
 /**********/
 
+/*
+ * KLOAK_FUZZING excludes main() so the dist-ai kloakwl fuzz/CBMC harnesses can
+ * #include this file to reach the static functions without a duplicate main.
+ */
+#ifndef KLOAK_FUZZING
 int main(int argc, char **argv) {
   int poll_ret = 0;
 
@@ -2554,3 +2559,4 @@ int main(int argc, char **argv) {
 
   assert(false);
 }
+#endif /* KLOAK_FUZZING */
