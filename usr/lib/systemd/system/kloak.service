@@ -45,22 +45,21 @@ RestartSec=2s
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 ProtectSystem=strict
-#ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ## hardened kernels without CONFIG_USER_NS_UNPRIVILEGED=Y
 ## need to:
-## * disable or comment out the 3 'Private' namespaces below
+## * disable or comment out the two 'Private' namespaces below
 ## $ systemctl edit --full kloak
 PrivateTmp=true
-#PrivateUsers=true
 PrivateNetwork=true
 MemoryDenyWriteExecute=true
 ## kloakwl runs under a SEPARATE, broader AppArmor profile (Px) to build its own
 ## sandbox (userns/mount/pivot_root); no_new_privs forbids an exec transition to a
-## non-subset profile, so it is off here. The SystemCallFilter below still installs
-## (the root executor holds CAP_SYS_ADMIN) and is inherited across the exec by kloakwl.
+## non-subset profile, so it is off here. kloak and kloakwl each set no_new_privs
+## themselves (prctl) once past the transition. The SystemCallFilter below still
+## installs (the root executor holds CAP_SYS_ADMIN) and is inherited by kloakwl.
 NoNewPrivileges=false
 RestrictRealtime=true
 ## kloak fork+execve's a sandboxed kloakwl Wayland adapter that builds its own
@@ -75,6 +74,10 @@ SystemCallArchitectures=native
 ## the service baseline; @sandbox @mount @privileged @setuid @resources cover
 ## kloakwl's unshare, mount/pivot_root, capset, uid/gid drop and rlimit calls.
 SystemCallFilter=@system-service @sandbox @mount @privileged @setuid @resources
+
+## The following settings do not work:
+#ProtectHome=true ## Prevents Wayland socket access
+#PrivateUsers=true ## Prevents Wayland socket access
 
 [Install]
 WantedBy=graphical.target

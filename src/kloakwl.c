@@ -1670,6 +1670,48 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
   *(cursor_y_ptr) = end.y;
 }
 
+static struct input_packet *find_merge_target_packet(
+  enum input_packet_type target_packet_type,
+  const enum input_packet_type *ignore_packet_type_list) {
+  struct input_packet *found_packet = NULL;
+
+  /*
+   * TAILQ_FOREACH_REVERSE would be useful here, but it is not documented to be
+   * implemented using a loop, therefore it may be unsafe to use 'break;'
+   * statements within it. We implement a loop manually for this reason.
+   */
+
+  found_packet = TAILQ_LAST(&evq_head, tailhead_evq);
+
+  while (found_packet != NULL) {
+    bool do_ignore_packet = false;
+
+    if (found_packet->packet_type == target_packet_type) {
+      break;
+    }
+
+    for (ssize_t i = 0; ; i++) {
+      enum input_packet_type ignore_packet_type = ignore_packet_type_list[i];
+      if (ignore_packet_type == 0) {
+        break;
+      }
+      if (found_packet->packet_type == ignore_packet_type) {
+        do_ignore_packet = true;
+        break;
+      }
+    }
+
+    if (!do_ignore_packet) {
+      found_packet = NULL;
+      break;
+    }
+
+    found_packet = TAILQ_PREV(found_packet, tailhead_evq, evq_entries);
+  }
+
+  return found_packet;
+}
+
 static struct input_packet *update_virtual_cursor(void) {
   struct screen_local_coord prev_scr_coord = { 0 };
   struct screen_local_coord scr_coord = { 0 };
@@ -1737,9 +1779,11 @@ static struct input_packet *update_virtual_cursor(void) {
     state.layers[scr_coord.output_idx]->frame_pending = true;
   }
 
-  /* = rather than == is intentional here */
-  if ((old_ev_packet = TAILQ_LAST(&evq_head, tailhead_evq))
-    && (old_ev_packet->packet_type == KLOAK_PACKET_TYPE_MOUSEMOVE)) {
+  old_ev_packet = find_merge_target_packet(
+    KLOAK_PACKET_TYPE_MOUSEMOVE,
+    (const enum input_packet_type[]){KLOAK_PACKET_TYPE_MOUSESCROLL, 0}
+  );
+  if (old_ev_packet != NULL) {
     old_ev_packet->data.coord_data.x = (int32_t)(cursor_x);
     old_ev_packet->data.coord_data.y = (int32_t)(cursor_y);
     return NULL;
@@ -1760,8 +1804,11 @@ static struct input_packet *update_mouse_scroll(void) {
   struct input_packet *ev_packet = NULL;
 
   if ((vert_scroll_ticks != 0) || (horiz_scroll_ticks != 0)) {
-    if ((old_ev_packet = TAILQ_LAST(&evq_head, tailhead_evq))
-      && (old_ev_packet->packet_type == KLOAK_PACKET_TYPE_MOUSESCROLL)) {
+    old_ev_packet = find_merge_target_packet(
+      KLOAK_PACKET_TYPE_MOUSESCROLL,
+      (const enum input_packet_type[]){KLOAK_PACKET_TYPE_MOUSEMOVE, 0}
+    );
+    if (old_ev_packet != NULL) {
       old_ev_packet->data.coord_data.y += vert_scroll_ticks;
       old_ev_packet->data.coord_data.x += horiz_scroll_ticks;
       return NULL;
@@ -1923,9 +1970,19 @@ static void release_scheduled_input_events(void) {
           (uint32_t)(ev_packet->sched_time), WL_POINTER_AXIS_VERTICAL_SCROLL,
           wl_fixed_from_int(ev_packet->data.coord_data.y
             * SCROLL_ANGLE_PER_TICK));
+        /*
+         * wlroots (or labwc?) apparently wants a double-negative for scrolling
+         * up or left. If 'value' is always positive and 'discrete' is allowed
+         * to be negative, most apps behave properly but Meld will only scroll
+         * down and right. If 'value' is allowed to be negative and 'discrete'
+         * is always positive, Qt apps will only scroll down. When both are
+         * allowed to be negative, scrolling works correctly.
+         */
         zwlr_virtual_pointer_v1_axis_discrete(state.virt_pointer,
           (uint32_t)(ev_packet->sched_time), WL_POINTER_AXIS_VERTICAL_SCROLL,
-          wl_fixed_from_int(SCROLL_ANGLE_PER_TICK),
+          ev_packet->data.coord_data.y >= 0
+            ? wl_fixed_from_int(SCROLL_ANGLE_PER_TICK)
+            : wl_fixed_from_int(-SCROLL_ANGLE_PER_TICK),
           ev_packet->data.coord_data.y);
         send_axis_source_and_frame = true;
       }
@@ -1936,8 +1993,10 @@ static void release_scheduled_input_events(void) {
             * SCROLL_ANGLE_PER_TICK));
         zwlr_virtual_pointer_v1_axis_discrete(state.virt_pointer,
           (uint32_t)(ev_packet->sched_time), WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-          wl_fixed_from_int(SCROLL_ANGLE_PER_TICK),
-            ev_packet->data.coord_data.x);
+          ev_packet->data.coord_data.x >= 0
+            ? wl_fixed_from_int(SCROLL_ANGLE_PER_TICK)
+            : wl_fixed_from_int(-SCROLL_ANGLE_PER_TICK),
+          ev_packet->data.coord_data.x);
         send_axis_source_and_frame = true;
       }
       if (send_axis_source_and_frame) {
@@ -2254,8 +2313,8 @@ static void applayer_sandbox_init(void) {
 
   /* Bind-mount XKB data into the sandbox filesystem. */
   safe_mkdir_p(xkb_path_component_list);
-  if (mount("/usr/share/X11/xkb", "/tmp/usr/share/X11/xkb", "", MS_BIND,
-    NULL) == -1) {
+  if (mount("/usr/share/X11/xkb", "/tmp/usr/share/X11/xkb", "",
+    MS_BIND | MS_RDONLY, NULL) == -1) {
     fprintf(stderr,
       "FATAL ERROR: Could not bind-mount XKB data into sandbox: %s\n",
       strerror(errno));
@@ -2506,7 +2565,7 @@ int main(int argc, char **argv) {
     }
     wl_display_flush_safe(state.display);
 
-    if (ev_fds[0].revents & POLLIN) {
+    if (ev_fds[0].revents & POLLIN || parse_ring_data_len > 0) {
       for (int8_t i = 0; i < MAX_PARENT_BATCH_MESSAGES; i++) {
         if (!process_parent_message()) {
           break;

@@ -1,71 +1,51 @@
+# Last Modified: Thu Nov 5 19:26:10 2026
 include <tunables/global>
 
-## Copyright (C) 2012 - 2025 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+## Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
 ## See the file COPYING for copying conditions.
 
-## kloakwl is the sandboxed Wayland adapter that /usr/bin/kloak fork+execve's.
-## It connects to the Wayland compositor, then builds its own in-process sandbox:
-## an unprivileged user namespace plus mnt/net/ipc/pid/uts/cgroup namespaces,
-## pivot_root into an empty tmpfs root, drop of all capabilities, and a drop to
-## the unprivileged kloakwl uid/gid. AppArmor mediates the namespace, mount and
-## capability operations even inside the new user namespace, so they are granted
-## here; everything else is the minimal pre-sandbox access it needs.
-
-/usr/bin/kloakwl flags=(attach_disconnected) {
+/usr/bin/kloakwl {
   include <local/usr.bin.kloakwl>
 
-  ## Wayland client socket, connected before the sandbox is entered.
   network unix stream,
 
-  ## In-process sandbox construction.
-  userns,
-  capability sys_admin,
-  capability sys_chroot,
-  capability setuid,
-  capability setgid,
-  ## As root (pre-uid-drop), traverse the user-owned /run/user/<uid> to the socket.
-  capability dac_override,
-  mount,
-  umount,
-  pivot_root,
-
   signal receive set=cont peer=unconfined,
+  signal receive set=exists peer=unconfined,
   signal receive set=kill peer=unconfined,
   signal receive set=term peer=unconfined,
+
+  capability dac_override,
+  deny capability dac_read_search,
+  capability setuid,
+  capability setgid,
+  ## This gets denied even in the sandbox if not permitted.
+  capability sys_admin,
+
+  userns create,
+
+  mount options=rprivate /,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec,nosymfollow) newroot -> /tmp/,
+  mount options=(ro,bind) /usr/share/X11/xkb/ -> /tmp/usr/share/X11/xkb/,
+  remount options=ro /tmp/,
+
+  pivot_root oldroot=/tmp/ /tmp/,
+
+  ## This is called after pivoting into /tmp.
+  umount /,
 
   /etc/ld.so.cache r,
   /etc/ld.so.preload r,
   /usr/bin/kloakwl mr,
   /{,usr/}lib{,32,64}/** mr,
 
-  ## Resolve the unprivileged kloakwl user/group it drops to.
+  @{PROC}/@{pid}/{uid_map,gid_map,setgroups} rw,
+  /tmp/ rw,
+  /tmp/usr/ rw,
+  /tmp/usr/** rw,
   /etc/nsswitch.conf r,
   /etc/passwd r,
   /etc/group r,
 
-  ## Unprivileged user-namespace id mapping. AppArmor mediates the resolved
-  ## numeric-pid path, not the /proc/self magic symlink, so match @{pid}.
-  @{PROC}/@{pid}/uid_map rw,
-  @{PROC}/@{pid}/gid_map rw,
-  @{PROC}/@{pid}/setgroups rw,
-  @{PROC}/ r,
-  @{PROC}/** r,
-
   /dev/urandom r,
-  /dev/null rw,
-  /dev/zero rw,
-  /dev/shm/* mrw,
-
-  ## Wayland socket, connected before pivot_root.
-  /run/user/*/ r,
-  /run/user/*/wayland-* rw,
-
-  ## Private tmpfs sandbox root built before pivot_root (the safe_mkdir_p tree).
-  /tmp/ rw,
-  /tmp/usr/ rw,
-  /tmp/usr/** rw,
-
-  ## xkb keymap: read, then bind-mounted into the sandbox root.
-  /usr/share/X11/xkb/ r,
-  /usr/share/X11/xkb/** r,
+  /run/user/*/wayland-* r,
 }

@@ -31,6 +31,8 @@
 #include <dirent.h>
 #include <sys/ioctl.h>
 #include <math.h>
+#include <linux/prctl.h>
+#include <sys/prctl.h>
 
 #include <libinput.h>
 #include <libevdev/libevdev.h>
@@ -1070,6 +1072,17 @@ static void applayer_kloakwl_init(void) {
       _exit(1);
     }
   }
+
+  /*
+   * Immediately set the NNP bit, we don't need to launch anything else that
+   * needs privileges different from the parent.
+   */
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) == -1) {
+    fprintf(stderr, "FATAL ERROR: Could not set NNP bit: %s\n",
+      strerror(errno));
+    exit(1);
+  }
+
   send_write_fd = ptc_pipe[1];
   recv_read_fd = ctp_pipe[0];
   /*
@@ -1380,7 +1393,7 @@ int main(int argc, char **argv) {
     ev_fds[1].revents = 0;
 
     if (wl_connect_success) {
-      if (ev_fds[2].revents & POLLIN) {
+      if (ev_fds[2].revents & POLLIN || parse_ring_data_len > 0) {
         process_child_message();
       }
       if (ev_fds[2].revents & POLLHUP) {
