@@ -88,6 +88,15 @@ for proto_pair in \
   PROTO_SRC+=("${base}.c")
 done
 
+## --- Generated kloak.h ----------------------------------------------
+##
+## kloak.h is generated from kloak.h.in ('make' bakes in the kloakwl
+## path) and is no longer committed, so a fresh checkout must render it
+## before compiling a harness that #include's src/kloak.c. Value is
+## irrelevant to the fuzzers (they never exec kloakwl); just needs to be
+## a valid string literal.
+sed 's#@KLOAKWL_PATH@#/usr/bin/kloakwl#g' src/kloak.h.in > src/kloak.h
+
 ## --- Harness compile loop -------------------------------------------
 ##
 ## Each harness #include's src/kloak.c with -DKLOAK_FUZZING so
