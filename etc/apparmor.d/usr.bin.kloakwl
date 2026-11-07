@@ -29,7 +29,6 @@ include <tunables/global>
   mount options=rprivate /,
   mount fstype=tmpfs options=(rw,nosuid,nodev,noexec,nosymfollow) newroot -> /tmp/,
   mount options=(ro,bind) /usr/share/X11/xkb/ -> /tmp/usr/share/X11/xkb/,
-  remount options=ro /tmp/,
 
   pivot_root oldroot=/tmp/ /tmp/,
 
@@ -44,8 +43,7 @@ include <tunables/global>
 
   @{PROC}/@{pid}/{uid_map,gid_map,setgroups} rw,
   /tmp/ rw,
-  /tmp/usr/ rw,
-  /tmp/usr/** rw,
+  /tmp/** rw,
   /etc/nsswitch.conf r,
   /etc/passwd r,
   /etc/group r,
@@ -60,4 +58,8 @@ include <tunables/global>
   ## this path; libxkbcommon reads it when the compositor keymap uses includes.
   /usr/share/X11/xkb/ r,
   /usr/share/X11/xkb/** r,
+
+  ## POSIX shm: kloakwl uses /dev/shm instead of memfd_create so
+  ## MemoryDenyWriteExecute=true is effective.
+  /dev/shm/* rw,
 }

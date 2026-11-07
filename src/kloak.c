@@ -33,6 +33,7 @@
 #include <math.h>
 #include <linux/prctl.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 
 #include <libinput.h>
 #include <libevdev/libevdev.h>
@@ -515,7 +516,8 @@ static void parse_esc_key_str(const char *esc_key_str) {
   /* esc_key_list_len is a global that persists across calls (parse_cli_args
    * calls this once per -k), so index the just-added slot by esc_key_list_len
    * - 1, never a per-call counter -- otherwise a second -k overwrites slot 0
-   * and leaves the new slot uninitialised. */
+   * and leaves the new slot uninitialised. A dup-option getopt guard makes a
+   * 2nd -k impossible via the CLI, but the dist-ai harness calls this directly. */
   while ((root_token = strsep(&esc_key_str_copy, ",")) != NULL) {
     if (root_token[0] == '\0' ) {
       fprintf(stderr,
@@ -638,18 +640,18 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
     if (ie->len > 0 && regexec(&evdev_reg, ie->name, 0, NULL, 0) == 0) {
       if (ie->mask & IN_CREATE) {
         *do_attach_ptr = true;
-        return ie->name;
-      }
-      if (ie->mask & IN_DELETE) {
+      } else if (ie->mask & IN_DELETE) {
         *do_attach_ptr = false;
-        return ie->name;
+      } else {
+        /*
+         * We explicitly configure the kernel to only return IN_CREATE and
+         * IN_DELETE events, so anything else indicates a serious problem that
+         * we should not continue past.
+         */
+        *buf_pos_ptr = -1;
+        return NULL;
       }
-      /*
-       * A matching event<N> node carrying neither IN_CREATE nor IN_DELETE is
-       * not an attach or a detach, so skip it rather than forcing either. This
-       * function is assert-free by contract (a fuzz seam fed untrusted buffers),
-       * so it must not abort on such a record.
-       */
+      return ie->name;
     }
 
     if (rem_len == 0) {
@@ -1352,6 +1354,7 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
+  init_fd_urandom();
   applayer_regex_init();
   applayer_kloakwl_init();
   applayer_inotify_init();
