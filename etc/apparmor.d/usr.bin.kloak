@@ -7,36 +7,26 @@ include <tunables/global>
 /usr/bin/kloak {
   include <local/usr.bin.kloak>
 
-  network unix stream,
-  network netlink raw,
-
   signal receive set=cont peer=unconfined,
   signal receive set=exists peer=unconfined,
   signal receive set=kill peer=unconfined,
   signal receive set=term peer=unconfined,
 
-  capability dac_override,
-  deny capability dac_read_search,
-
   /etc/ld.so.cache r,
   /etc/ld.so.preload r,
   /usr/bin/kloak mr,
+  ## kloak fork+execve's the sandboxed Wayland adapter; confine it under its own
+  ## (broader) profile, named explicitly so the transition cannot fall back.
+  /usr/bin/kloakwl rPx -> /usr/bin/kloakwl,
   /{,usr/}lib{,32,64}/** mr,
   /dev/input/ r,
   /dev/input/event* rw,
-  /dev/console r,
+  /dev/shm/* rw,
   /dev/urandom r,
-  /dev/shm/* mrw,
-  /dev/zero rw,
-  /dev/null rw,
+
+  ## libinput needs these.
   /sys/devices/**/uevent r,
   /run/udev/data/* r,
-  /run/user/*/ r,
-  /run/user/*/wayland-* r,
-
-  /proc/* r,
-  /proc/** r,
-
   /usr/share/libinput/ r,
   /usr/share/libinput/* r,
 }

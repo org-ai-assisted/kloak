@@ -1,4 +1,7 @@
 /kloak
+/kloakwl
+## generated from src/kloak.h.in by 'make' (bakes in the kloakwl path)
+/src/kloak.h
 /out/
 eventcap
 cmake-build-debug/
