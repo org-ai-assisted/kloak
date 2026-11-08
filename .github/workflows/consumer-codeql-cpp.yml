@@ -45,7 +45,7 @@ concurrency:
 
 jobs:
   c-cpp:
-    uses: org-ai-assisted/developer-meta-files/.github/workflows/reusable-codeql.yml@refs/heads/ai
+    uses: org-ai-assisted/developer-meta-files/.github/workflows/reusable-codeql.yml@ai
     with:
       language: c-cpp
       build-mode: manual
