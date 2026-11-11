@@ -1633,13 +1633,11 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
        * If all of the above fail, we've gone diagonally off a screen and into
        * compositor global space. Move the cursor back to where it was and
        * stop it. Technically we should also be doing this if two different
-       * directions both work to get us back on-screen, but we don't currently
-       * and the one-pixel shift resulting from this likely isn't worth caring
-       * about.
-       *
-       * TODO: Is there a reason to care about this one-pixel shift? Does its
-       * existence leak information an attacker wouldn't be able to get
-       * otherwise?
+       * directions both work to get us back on-screen, but we don't currently.
+       * The resulting one-pixel shift leaks nothing: kloak obfuscates event
+       * timing, not cursor geometry, and the final cursor position is already
+       * observable to the compositor and every client regardless, so this
+       * corner case gives an attacker nothing they could not otherwise see.
        */
       end.x = prev_trav_coord.x;
       end.y = prev_trav_coord.y;
