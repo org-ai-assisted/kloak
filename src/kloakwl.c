@@ -896,7 +896,10 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
   assert(geometry != NULL);
   if (width == 0) {
     if (geometry->width <= 0) {
-      /* Skip this configure event, compositor hasn't given us enough info. */
+      /* Skip this configure event, compositor hasn't given us enough info.
+       * The frame memory was already freed above, so mark the layer
+       * unconfigured -- otherwise draw_frame would deref the freed pixbuf. */
+      layer->layer_surface_configured = false;
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
@@ -904,6 +907,7 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
   }
   if (height == 0) {
     if (geometry->height <= 0) {
+      layer->layer_surface_configured = false;
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
