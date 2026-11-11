@@ -510,15 +510,14 @@ static void parse_esc_key_str(const char *esc_key_str) {
   char *orig_key_str_copy = esc_key_str_copy;
   char *root_token = NULL;
   const char *sub_token = NULL;
-  size_t idx = 0;
+  size_t i = 0;
   size_t j = 0;
 
-  /* esc_key_list_len is a global that persists across calls (parse_cli_args
-   * calls this once per -k), so index the just-added slot by esc_key_list_len
-   * - 1, never a per-call counter -- otherwise a second -k overwrites slot 0
-   * and leaves the new slot uninitialised. A dup-option getopt guard makes a
-   * 2nd -k impossible via the CLI, but the dist-ai harness calls this directly. */
-  while ((root_token = strsep(&esc_key_str_copy, ",")) != NULL) {
+  /*
+   * -k can only be passed once, so it's fine to assume esc_key_list and
+   * related vars are unpopulated at this point.
+   */
+  for (i = 0; ((root_token = strsep(&esc_key_str_copy, ",")) != NULL); i++) {
     if (root_token[0] == '\0' ) {
       fprintf(stderr,
         "FATAL ERROR: Empty key name specified in escape key list!\n");
@@ -526,16 +525,15 @@ static void parse_esc_key_str(const char *esc_key_str) {
     }
 
     esc_key_list_len++;
-    idx = esc_key_list_len - 1;
     esc_key_list = safe_reallocarray(esc_key_list, esc_key_list_len,
       sizeof(uint32_t *));
     esc_key_sublist_len = safe_reallocarray(esc_key_sublist_len,
       esc_key_list_len, sizeof(size_t));
     active_esc_key_list = safe_reallocarray(active_esc_key_list,
       esc_key_list_len, sizeof(int8_t));
-    esc_key_list[idx] = NULL;
-    esc_key_sublist_len[idx] = 0;
-    active_esc_key_list[idx] = 0;
+    esc_key_list[i] = NULL;
+    esc_key_sublist_len[i] = 0;
+    active_esc_key_list[i] = 0;
 
     for (j = 0; ((sub_token = strsep(&root_token, "|")) != NULL); j++)  {
       if (sub_token[0] == '\0') {
@@ -544,11 +542,11 @@ static void parse_esc_key_str(const char *esc_key_str) {
         exit(1);
       }
 
-      esc_key_sublist_len[idx]++;
-      esc_key_list[idx] = safe_reallocarray(esc_key_list[idx],
-        esc_key_sublist_len[idx], sizeof(uint32_t));
-      esc_key_list[idx][j] = lookup_keycode(sub_token);
-      if (esc_key_list[idx][j] == 0) {
+      esc_key_sublist_len[i]++;
+      esc_key_list[i] = safe_reallocarray(esc_key_list[i],
+        esc_key_sublist_len[i], sizeof(uint32_t));
+      esc_key_list[i][j] = lookup_keycode(sub_token);
+      if (esc_key_list[i][j] == 0) {
         fprintf(stderr, "FATAL ERROR: Unrecognized key name '%s'!\n",
           sub_token);
         exit(1);
