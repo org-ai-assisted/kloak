@@ -605,6 +605,7 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
   ssize_t rem_len = buf_len - *buf_pos_ptr;
   struct inotify_event *ie = (void *)(inotify_buf + *buf_pos_ptr);
   ssize_t struct_len = 0;
+  uintmax_t struct_len_u = 0;
 
   if (rem_len < 0) {
     *buf_pos_ptr = -1;
@@ -618,19 +619,18 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
       *buf_pos_ptr = -1;
       return NULL;
     }
-    /* ie->len is uint32_t; where ssize_t is 32-bit (i386/armhf) a large len
-     * exceeds SSIZE_MAX and the cast below wraps negative, so reject an
-     * oversized record first (AGENTS.md: inotify-Specific). */
-    if ((uintmax_t)(ie->len) > (uintmax_t)(SSIZE_MAX) - sizeof(struct inotify_event)) {
+    /* ie->len is kernel-controlled; compute the record length in uintmax_t so
+     * a large value cannot overflow ssize_t (which traps under -ftrapv) or
+     * wrap negative on a 32-bit ssize_t before the bound check (AGENTS.md:
+     * inotify-Specific). rem_len >= sizeof(struct inotify_event) here, so the
+     * cast back to ssize_t is in range. */
+    struct_len_u = (uintmax_t)(sizeof(struct inotify_event))
+      + (uintmax_t)(ie->len);
+    if (struct_len_u > (uintmax_t)(rem_len)) {
       *buf_pos_ptr = -1;
       return NULL;
     }
-    struct_len = ((ssize_t)(sizeof(struct inotify_event))
-      + (ssize_t)(ie->len));
-    if (struct_len > rem_len) {
-      *buf_pos_ptr = -1;
-      return NULL;
-    }
+    struct_len = (ssize_t)(struct_len_u);
     rem_len -= struct_len;
     if (rem_len < 0) {
       *buf_pos_ptr = -1;
