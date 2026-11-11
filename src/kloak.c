@@ -284,7 +284,7 @@ static struct timespec ms_to_timespec(int64_t ms) {
   struct timespec ts = { 0 };
   assert(ms >= 0);
   ts.tv_sec = (time_t)(ms / 1000);
-  ts.tv_nsec = (ms % 1000) * 1000000;
+  ts.tv_nsec = (long)((ms % 1000) * 1000000);
   return ts;
 }
 
@@ -618,7 +618,13 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
       *buf_pos_ptr = -1;
       return NULL;
     }
-    /* No need to check if ie->len fits in struct_len, uint32_t is too small */
+    /* ie->len is uint32_t; where ssize_t is 32-bit (i386/armhf) a large len
+     * exceeds SSIZE_MAX and the cast below wraps negative, so reject an
+     * oversized record first (AGENTS.md: inotify-Specific). */
+    if ((uintmax_t)(ie->len) > (uintmax_t)(SSIZE_MAX) - sizeof(struct inotify_event)) {
+      *buf_pos_ptr = -1;
+      return NULL;
+    }
     struct_len = ((ssize_t)(sizeof(struct inotify_event))
       + (ssize_t)(ie->len));
     if (struct_len > rem_len) {

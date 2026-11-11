@@ -303,7 +303,7 @@ static void read_random(char *buf, ssize_t len) {
 
   if (read(FD_URANDOM, buf, (size_t)(len)) < len) {
     fprintf(stderr,
-      "FATAL ERROR: Could not read %ld byte(s) from /dev/urandom!\n", len);
+      "FATAL ERROR: Could not read %zd byte(s) from /dev/urandom!\n", len);
     exit(1);
   }
 }
