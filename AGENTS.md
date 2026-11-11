@@ -114,7 +114,7 @@ live in the AI-maintained dist-ai repo, not here
 
 ## Settled -- do not re-litigate
 
-Maintainer decisions from the Whonix/kloak#24 audit. A reviewer re-raising one
+Accepted maintainer decisions (Whonix/kloak audits). A reviewer re-raising one
 is a false positive; drop it. Standing: record every accepted maintainer
 decision (wontfix / by-design / out-of-scope) here when it is made, so it is
 not re-litigated.
@@ -136,3 +136,9 @@ not re-litigated.
 - `LIBINPUT_EVENT_DEVICE_REMOVED` does not synthesize key/button releases: not
   needed. libinput emits releases for held inputs when a device is removed; the
   per-device tracking-queue approach was reverted as buggy and must not return.
+- CLI options are single-use. The getopt duplicate-option guard rejects any
+  repeat; the parsers assume one call. Do not support or test passing an option
+  more than once (the repeated-`-k` uninitialised-slot concern is moot).
+- Move-over-scroll packet coalescing relocates the scroll deliberately: under a
+  high-resolution scroll flood mixed with pointer movement, preserving jitter
+  outweighs the rare scroll misplacement.
