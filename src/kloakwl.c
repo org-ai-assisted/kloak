@@ -1077,10 +1077,16 @@ static int open_wl_sock(void) {
   connect_success = connect(wl_sock_fd,
     (const struct sockaddr *)(&wl_sockaddr), sizeof(wl_sockaddr));
   if (connect_success == -1) {
+    /* The compositor socket is absent/unreachable. Mirror the display/registry
+     * failures in applayer_wayland_init: report the Wayland connection as lost
+     * to the parent and exit cleanly, so the parent can honor its degraded mode
+     * (skip the grab, await the escape combo) instead of seeing a POLLHUP on
+     * the child pipe and aborting early init. */
     fprintf(stderr,
-      "FATAL ERROR: Could not connect to Wayland compositor: %s\n",
+      "WARNING: Could not connect to Wayland compositor: %s\n",
       strerror(errno));
-    exit(1);
+    send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
+    exit(0);
   }
 
   if (should_free_wl_sock_path) {

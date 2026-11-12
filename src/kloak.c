@@ -1225,7 +1225,12 @@ static void applayer_poll_init(void) {
   ev_fds[0].events = POLLIN;
   ev_fds[1].fd = inotify_fd;
   ev_fds[1].events = POLLIN;
-  ev_fds[2].fd = recv_read_fd;
+  /* In degraded mode (Wayland connect failed, exit_on_wl_connect_failure unset)
+   * the child has already exited, so its pipe only ever reports POLLHUP. The
+   * main loop services ev_fds[2] solely under `if (wl_connect_success)`, so
+   * polling a dead pipe here would return instantly every iteration and spin at
+   * 100% CPU. Stop watching it when degraded (poll ignores a negative fd). */
+  ev_fds[2].fd = wl_connect_success ? recv_read_fd : -1;
   ev_fds[2].events = POLLIN;
 }
 
