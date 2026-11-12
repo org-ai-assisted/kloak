@@ -453,6 +453,14 @@ static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
 
   assert(should_draw_cursor);
 
+  /* A size-less reconfigure frees pixbuf while buffers the compositor still
+   * holds remain outstanding; a later wl_buffer_release (which does not check
+   * layer_surface_configured) would then draw into the freed mapping. Skip the
+   * draw when there is no framebuffer. */
+  if (pixbuf == NULL) {
+    return;
+  }
+
   start_x = x - rad;
   if (start_x < 0) start_x = 0;
   start_y = y - rad;
