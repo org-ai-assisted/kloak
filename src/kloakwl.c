@@ -898,6 +898,10 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
     }
   }
   assert(layer != NULL);
+  /* The matching layer was found in the loop above (else the assert fired), so i
+   * indexes a valid slot; assert the bound before indexing (AGENTS.md: assert
+   * both bounds before a fixed-size array access). */
+  assert(i >= 0 && i < MAX_SCREEN_COUNT);
 
   /*
    * Use the pending output geometry here, as it likely contains an up-to-date
