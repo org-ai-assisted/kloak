@@ -4,10 +4,10 @@
  *
  * AI-Assisted
  *
- * libFuzzer harness for kloak's parse_uint32_arg() string-to-uint32
- * parser. Called from parse_cli_args() to handle --cursor-color
- * (base 16). Sibling to fuzz_parse_uint31; same #include +
- * KLOAK_FUZZING approach.
+ * libFuzzer harness for kloak's parse_uint_arg() string-to-uint
+ * parser at its UINT32_MAX cap. Called from parse_cli_args() to
+ * handle --cursor-color (base 16). Sibling to fuzz_parse_uint31;
+ * same #include + KLOAK_FUZZING approach.
  */
 
 #ifndef KLOAK_FUZZING
@@ -36,7 +36,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   buf[slen] = '\0';
 
   uint32_t out = 0;
-  (void)parse_uint32_arg(buf, base, &out);
+  (void)parse_uint_arg(buf, base, UINT32_MAX, &out);
 
   free(buf);
   return 0;
