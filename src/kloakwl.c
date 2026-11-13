@@ -1,6 +1,8 @@
 /*
  * SPDX-FileCopyrightText: ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
  * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Wayland handling code.
  */
 
 #define _GNU_SOURCE
@@ -39,6 +41,7 @@
 #include <sys/queue.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <err.h>
 
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
@@ -86,7 +89,10 @@ static struct pollfd *ev_fds = NULL;
 static int64_t prev_release_time = 0;
 static TAILQ_HEAD(tailhead_evq, input_packet) evq_head;
 
-static int64_t start_time = 0;
+xkb_mod_mask_t last_depressed_mods = 0;
+xkb_mod_mask_t last_latched_mods = 0;
+xkb_mod_mask_t last_locked_mods = 0;
+xkb_layout_index_t last_effective_group = 0;
 
 /*********************/
 /* Utility functions */
@@ -118,35 +124,29 @@ static void safe_mkdir_p(const char **path_component_list) {
 
   for (i = 0; i < path_component_list_len; i++) {
     if (path_component_list[i][0] != '/') {
-      fprintf(stderr, "FATAL ERROR: Missing slash in path component '%s'!\n",
+      errx(1, "FATAL ERROR: Missing slash in path component '%s'",
         path_component_list[i]);
-      exit(1);
     }
 
     copy_target = stpcpy(copy_target, path_component_list[i]);
 
     if (stat(target_path, &statbuf) == -1) {
       if (errno != ENOENT) {
-        fprintf(stderr, "FATAL ERROR: Could not stat '%s': %s\n", target_path,
-          strerror(errno));
-        exit(1);
+        err(1, "FATAL ERROR: Could not stat '%s'", target_path);
       }
       /* Path component doesn't exist, we expect this. */
     } else {
       /* Path component does exist, ensure it's a directory. */
       if (!S_ISDIR(statbuf.st_mode)) {
-        fprintf(stderr, "FATAL ERROR: '%s' exists and is not a directory!",
+        errx(1, "FATAL ERROR: '%s' exists and is not a directory",
           target_path);
-        exit(1);
       }
       /* Look at the next path component since this one exists. */
       continue;
     }
 
     if (mkdir(target_path, 0700) == -1) {
-      fprintf(stderr, "FATAL ERROR: Could not create directory '%s': %s\n",
-        target_path, strerror(errno));
-      exit(1);
+      err(1, "FATAL ERROR: Could not create directory '%s'", target_path);
     }
   }
 
@@ -159,27 +159,23 @@ static int64_t timespec_to_ms(struct timespec spec) {
   assert(spec.tv_sec >= 0);
   assert(spec.tv_nsec < 1000000000);
   assert(spec.tv_nsec >= 0);
-  result = ((int64_t)spec.tv_sec * 1000) + (spec.tv_nsec / 1000000);
-  assert(result >= 0);
+  result = ((int64_t)(spec.tv_sec) * 1000)
+    + ((int64_t)(spec.tv_nsec) / 1000000);
   return result;
 }
 
 static int64_t current_time_ms(void) {
   struct timespec spec = { 0 };
-  int64_t result = 0;
 
-  clock_gettime(CLOCK_MONOTONIC, &spec);
-  result = timespec_to_ms(spec);
-  if (start_time == 0) {
-    start_time = result;
-    return 0;
+  if (clock_gettime(CLOCK_MONOTONIC, &spec) == -1) {
+    err(1, "FATAL ERROR: Could not get monotonic time");
   }
-  return result - start_time;
+  return timespec_to_ms(spec);
 }
 
 static int64_t random_between(int64_t lower, int64_t upper) {
   int64_t maxval = 0;
-  int64_t randval;
+  int64_t randval = 0;
 
   assert(lower >= 0);
   assert(upper >= 0);
@@ -191,6 +187,15 @@ static int64_t random_between(int64_t lower, int64_t upper) {
 
   maxval = upper - lower + 1;
   assert(maxval > 0);
+
+  /*
+   * See the very long comment about modulo bias avoidance in kloak-shared.h
+   * fill_with_rand_alphabetic() function for an explanation of how this code
+   * works and why it is safe. It may be possible to optimize this a bit for
+   * pathological cases where INT64_MAX is evenly divisible by large values of
+   * maxval, but it is unknown how common those cases are and how often retries
+   * are unnecessarily done in those cases.
+   */
   do {
     read_random((char *)(&randval), sizeof(int64_t));
     if (randval == INT64_MIN) {
@@ -209,41 +214,41 @@ static void write_to_file(const char *file_path, const char *content_template,
   va_list template_args;
   char *out_str = NULL;
   int out_write_len = 0;
-  int file_fd = 0;
+  int file_fd = -1;
 
   va_start(template_args, content_template);
   out_str = vsgenprintf(&out_write_len, content_template, template_args);
   va_end(template_args);
 
-  file_fd = open(file_path, O_RDWR);
-  if (file_fd == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not open file '%s': %s\n", file_path,
-      strerror(errno));
-    exit(1);
-  }
+  file_fd = safe_open(file_path, O_RDWR | O_CLOEXEC);
 
   if (write_all(file_fd, out_str, (size_t)(out_write_len)) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not write all text to file '%s': %s\n", file_path,
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not write all text to file '%s'", file_path);
   }
 
-  if (close(file_fd) == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not close file '%s': %s\n", file_path,
-      strerror(errno));
-    exit(1);
-  }
-
+  safe_close(file_fd, file_path);
   free(out_str);
 }
 
 static void change_dumpable(bool is_dumpable) {
   long int dumpable_int = is_dumpable ? 1L : 0L;
   if (prctl(PR_SET_DUMPABLE, dumpable_int) == -1) {
-    fprintf(stderr, "FATAL ERROR: Failed to set dumpability to %ld: %s\n",
-      dumpable_int, strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Failed to set dumpability to %ld", dumpable_int);
+  }
+}
+
+static void grow_line_segment(int32_t *pos_point_ptr, int32_t *length_ptr) {
+  if (*pos_point_ptr > INT32_MIN) {
+    *pos_point_ptr -= 1;
+    if (*length_ptr < INT32_MAX - 1) {
+      *length_ptr += 2;
+    } else if (*length_ptr < INT32_MAX) {
+      *length_ptr += 1;
+    }
+  } else {
+    if (*length_ptr < INT32_MAX) {
+      *length_ptr += 1;
+    }
   }
 }
 
@@ -263,18 +268,8 @@ static bool check_screen_touch(struct output_geometry scr1,
     return false;
   }
 
-  if (scr1.x > INT32_MIN) {
-    scr1.x -= 1;
-    scr1.width += 2;
-  } else {
-    scr1.width += 1;
-  }
-  if (scr1.y > INT32_MIN) {
-    scr1.y -= 1;
-    scr1.height += 2;
-  } else {
-    scr1.height += 1;
-  }
+  grow_line_segment(&scr1.x, &scr1.width);
+  grow_line_segment(&scr1.y, &scr1.height);
 
   if (scr1.x < (scr2.x + scr2.width)
     && scr2.x < (scr1.x + scr1.width)
@@ -288,14 +283,13 @@ static bool check_screen_touch(struct output_geometry scr1,
 
 static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
   int32_t y) {
-  struct screen_local_coord out_data = { 0 };
+  struct screen_local_coord out_data = EMPTY_SCREEN_LOCAL_COORD;
   int32_t cur_geom_x = 0;
   int32_t cur_geom_y = 0;
   int32_t cur_geom_width = 0;
   int32_t cur_geom_height = 0;
-  int32_t i = 0;
 
-  for (i = 0; i < MAX_SCREEN_COUNT; i++) {
+  for (int32_t i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (!state.output_geometries[i]) {
       continue;
     }
@@ -323,16 +317,9 @@ static struct screen_local_coord abs_coord_to_screen_local_coord(int32_t x,
     out_data.output_idx = i;
     out_data.x = x - cur_geom_x;
     out_data.y = y - cur_geom_y;
-    out_data.valid = true;
     break;
   }
 
-  /*
-   * There is a possibility that out_data will contain all zeros; if this
-   * happens, it means that no output covered the requested coordinates in the
-   * compositor's global space. That's a valid thing to tell a caller, so just
-   * return it anyway.
-   */
   return out_data;
 }
 
@@ -389,6 +376,8 @@ struct coord traverse_line(struct coord start, struct coord end,
   static int32_t err_2x_val = 0;
   static int32_t last_pos = 0;
   static int32_t max_pos = 0;
+  static int32_t max_x = 0;
+  static int32_t max_y = 0;
   int32_t i = 0;
 
   assert(pos >= 0);
@@ -401,8 +390,12 @@ struct coord traverse_line(struct coord start, struct coord end,
   if (last_start.x != start.x || last_start.y != start.y
     || last_end.x != end.x || last_end.y != end.y || pos < last_pos) {
     work_coord = start;
-    err_adj.x = abs(end.x - start.x);
-    err_adj.y = -abs(end.y - start.y);
+    err_adj.x = end.x - start.x;
+    assert(err_adj.x != INT32_MIN);
+    err_adj.x = abs(err_adj.x);
+    err_adj.y = end.y - start.y;
+    assert(err_adj.y != INT32_MIN);
+    err_adj.y = -abs(err_adj.y);
     direct_adj.x = start.x < end.x ? 1 : -1;
     direct_adj.y = start.y < end.y ? 1 : -1;
     err_val = err_adj.x + err_adj.y;
@@ -410,7 +403,13 @@ struct coord traverse_line(struct coord start, struct coord end,
     last_start = start;
     last_end = end;
     last_pos = 0;
-    max_pos = MAX(abs(end.x - start.x), abs(end.y - start.y));
+    max_x = end.x - start.x;
+    assert(max_x != INT32_MIN);
+    max_x = abs(max_x);
+    max_y = end.y - start.y;
+    assert(max_y != INT32_MIN);
+    max_y = abs(max_y);
+    max_pos = MAX(max_x, max_y);
   }
 
   if (pos > max_pos) {
@@ -452,14 +451,6 @@ static void draw_block(uint32_t *pixbuf, int32_t offset, int32_t x, int32_t y,
   int32_t work_y = 0;
 
   assert(should_draw_cursor);
-
-  /* A size-less reconfigure frees pixbuf while buffers the compositor still
-   * holds remain outstanding; a later wl_buffer_release (which does not check
-   * layer_surface_configured) would then draw into the freed mapping. Skip the
-   * draw when there is no framebuffer. */
-  if (pixbuf == NULL) {
-    return;
-  }
 
   start_x = x - rad;
   if (start_x < 0) start_x = 0;
@@ -521,18 +512,26 @@ static void registry_handle_global(__attribute__((unused)) void *data,
   if (strcmp(interface, wl_compositor_interface.name) == 0) {
     state.compositor = wl_registry_bind(registry, name,
       &wl_compositor_interface, 5);
+    if (!state.compositor) {
+      err(1, "FATAL ERROR: Could not bind wl_compositor");
+    }
 
   } else if (strcmp(interface, wl_seat_interface.name) == 0) {
     if (!state.seat) {
       state.seat = wl_registry_bind(
         registry, name, &wl_seat_interface, 9);
+      if (!state.seat) {
+        err(1, "FATAL ERROR: Could not bind wl_seat");
+      }
     } else {
-      fprintf(stderr,
-        "WARNING: Multiple seats detected, all but first will be ignored.\n");
+      warnx("WARNING: Multiple seats detected, all but first will be ignored.");
     }
 
   } else if (strcmp(interface, wl_shm_interface.name) == 0) {
     state.shm = wl_registry_bind(registry, name, &wl_shm_interface, 2);
+    if (!state.shm) {
+      err(1, "FATAL ERROR: Could not bind wl_shm");
+    }
 
   } else if (strcmp(interface, wl_output_interface.name) == 0) {
     bool new_output_assigned = false;
@@ -541,7 +540,11 @@ static void registry_handle_global(__attribute__((unused)) void *data,
       if (!state.outputs[i]) {
         state.outputs[i] = wl_registry_bind(registry, name,
           &wl_output_interface, 4);
+        if (!state.outputs[i]) {
+          err(1, "FATAL ERROR: Could not bind wl_output");
+        }
         state.output_names[i] = name;
+        state.output_config_flag_list[i] = true;
         if (did_wayland_init) {
           init_new_display(i);
         }
@@ -550,31 +553,41 @@ static void registry_handle_global(__attribute__((unused)) void *data,
       }
     }
     if (!new_output_assigned) {
-      fprintf(stderr,
-        "FATAL ERROR: Cannot handle more than %d displays attached at once!\n",
+      errx(1, "FATAL ERROR: Cannot handle more than %d displays attached at once",
         MAX_SCREEN_COUNT);
-      exit(1);
     }
 
   } else if (strcmp(interface, zxdg_output_manager_v1_interface.name) == 0) {
     state.xdg_output_manager = wl_registry_bind(registry, name,
       &zxdg_output_manager_v1_interface, 3);
+    if (!state.xdg_output_manager) {
+      err(1, "FATAL ERROR: Could not bind zxdg_output_manager_v1");
+    }
 
   } else if (strcmp(interface, zwlr_layer_shell_v1_interface.name) == 0) {
     if (should_draw_cursor) {
       state.layer_shell = wl_registry_bind(registry, name,
         &zwlr_layer_shell_v1_interface, 4);
+      if (!state.layer_shell) {
+        err(1, "FATAL ERROR: Could not bind zwlr_layer_shell_v1");
+      }
     }
 
   } else if (strcmp(interface,
     zwlr_virtual_pointer_manager_v1_interface.name) == 0) {
     state.virt_pointer_manager = wl_registry_bind(registry, name,
       &zwlr_virtual_pointer_manager_v1_interface, 2);
+    if (!state.virt_pointer_manager) {
+      err(1, "FATAL ERROR: Could not bind zwlr_virtual_pointer_manager_v1");
+    }
 
   } else if (strcmp(interface,
     zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
     state.virt_kb_manager = wl_registry_bind(registry, name,
       &zwp_virtual_keyboard_manager_v1_interface, 1);
+    if (!state.virt_kb_manager) {
+      err(1, "FATAL ERROR: Could not bind zwp_virtual_keyboard_manager_v1");
+    }
   }
 }
 
@@ -585,24 +598,25 @@ static void registry_handle_global_remove(__attribute__((unused)) void *data,
 
   if (did_wayland_init) {
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-      if (state.layers[i] && state.output_names[i] == name) {
+      if (state.outputs[i] && state.output_names[i] == name) {
         state.wl_output_remove_flags[i] = true;
-        state.xdg_output_reconfig_flags[i] = false;
+        state.output_config_flag_list[i] = false;
         display_sync_maybe();
         break;
       }
     }
   } else {
     /*
-     * During early init, only outputs[i] and output_names[i] are set,
-     * everything else will be set once early init is done. We can free things
-     * immediately in this instance.
+     * During early init, only outputs[i], output_names[i], and
+     * output_config_flag_list[i] are set, everything else will be set once
+     * early init is done. We can free things immediately in this instance.
      */
     for (i = 0; i < MAX_SCREEN_COUNT; i++) {
       if (state.outputs[i] && state.output_names[i] == name) {
         wl_output_release(state.outputs[i]);
         state.outputs[i] = NULL;
         state.output_names[i] = 0;
+        state.output_config_flag_list[i] = false;
         break;
       }
     }
@@ -610,9 +624,9 @@ static void registry_handle_global_remove(__attribute__((unused)) void *data,
 }
 
 static void seat_handle_name(__attribute__((unused)) void *data,
-  __attribute__((unused)) struct wl_seat *seat, const char *name) {
-
-  state.seat_name = name;
+  __attribute__((unused)) struct wl_seat *seat,
+  __attribute__((unused)) const char *name) {
+  ;
 }
 
 static void seat_handle_capabilities(__attribute__((unused)) void *data,
@@ -621,11 +635,14 @@ static void seat_handle_capabilities(__attribute__((unused)) void *data,
   state.seat_caps = capabilities;
   if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) {
     state.kb = wl_seat_get_keyboard(seat);
-    wl_keyboard_add_listener(state.kb, &kb_listener, &state);
+    if (!state.kb) {
+      err(1, "FATAL ERROR: Could not get wl_keyboard");
+    }
+    if (wl_keyboard_add_listener(state.kb, &kb_listener, NULL) == -1) {
+      assert(false);
+    }
   } else {
-    fprintf(stderr,
-      "FATAL ERROR: No keyboard capability for seat, cannot continue.\n");
-    exit(1);
+    errx(1, "FATAL ERROR: No keyboard capability for seat, cannot continue");
   }
 }
 
@@ -635,9 +652,8 @@ static void kb_handle_keymap(__attribute__((unused)) void *data,
   char *kb_map_shm = NULL;
 
   if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
-    fprintf(stderr,
-      "WARNING: Unsupported raw keymap was provided by server, ignoring.\n");
-    safe_close(fd);
+    warnx("WARNING: Unsupported raw keymap was provided by server, ignoring");
+    safe_close(fd, "Wayland keymap data");
     return;
   }
 
@@ -650,30 +666,33 @@ static void kb_handle_keymap(__attribute__((unused)) void *data,
    */
   kb_map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (kb_map_shm == MAP_FAILED) {
-    fprintf(stderr, "FATAL ERROR: Could not mmap xkb layout!\n");
-    exit(1);
+    err(1, "FATAL ERROR: Could not mmap xkb layout");
   }
 
   /* XKB v1 keymaps are NULL-terminated strings. */
   if (memchr(kb_map_shm, '\0', size) == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Compositor sent potentially malicious keymap with no NULL terminator");
   }
 
   if (state.old_kb_map_shm) {
     if (strcmp(state.old_kb_map_shm, kb_map_shm) == 0) {
       /* New and old maps are the same, cleanup and return. */
-      munmap(kb_map_shm, size);
-      safe_close(fd);
+      if (munmap(kb_map_shm, size) == -1) {
+        assert(false);
+      }
       return;
     } else {
       assert(state.old_kb_map_shm_size >= 0);
-      munmap(state.old_kb_map_shm,
-        (size_t)(state.old_kb_map_shm_size));
+      if (munmap(state.old_kb_map_shm,
+        (size_t)(state.old_kb_map_shm_size)) == -1) {
+        assert(false);
+      }
     }
   }
+
   zwp_virtual_keyboard_v1_keymap(state.virt_kb, format, fd, size);
+  safe_close(fd, "Wayland keymap data");
+
   state.old_kb_map_shm = kb_map_shm;
   state.old_kb_map_shm_size = (int32_t)(size);
   if (state.xkb_keymap) {
@@ -683,19 +702,15 @@ static void kb_handle_keymap(__attribute__((unused)) void *data,
     state.xkb_ctx, kb_map_shm, XKB_KEYMAP_FORMAT_TEXT_V1,
     XKB_KEYMAP_COMPILE_NO_FLAGS);
   if (!state.xkb_keymap) {
-    fprintf(stderr, "FATAL ERROR: Could not compile xkb layout!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Could not compile xkb layout");
   }
-  safe_close(fd);
   if (state.xkb_state) {
     xkb_state_unref(state.xkb_state);
   }
   state.xkb_state = xkb_state_new(state.xkb_keymap);
   if (!state.xkb_state) {
-    fprintf(stderr, "FATAL ERROR: Could not create xkb state!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Could not create xkb state");
   }
-  state.virt_kb_keymap_set = true;
 }
 
 /*
@@ -769,13 +784,16 @@ static void wl_output_handle_mode(__attribute__((unused)) void *data,
 
 static void wl_output_info_done(__attribute__((unused)) void *data,
   struct wl_output *output) {
-
+  bool output_handled = false;
   for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (state.outputs[i] == output) {
-      state.xdg_output_reconfig_flags[i] = false;
+      state.output_config_flag_list[i] = false;
+      output_handled = true;
       break;
     }
   }
+
+  assert(output_handled);
 
   display_sync_maybe();
 }
@@ -802,20 +820,25 @@ static void xdg_output_handle_logical_position(
   __attribute__((unused)) void *data, struct zxdg_output_v1 *xdg_output,
   int32_t x, int32_t y) {
   ssize_t i = 0;
+  bool output_handled = false;
 
   for (i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (state.xdg_outputs[i] == xdg_output) {
       state.pending_output_geometries[i]->x = x;
       state.pending_output_geometries[i]->y = y;
-      state.xdg_output_reconfig_flags[i] = true;
+      state.output_config_flag_list[i] = true;
+      output_handled = true;
       break;
     }
   }
+
+  assert(output_handled);
 }
 
 static void xdg_output_handle_logical_size(__attribute__((unused)) void *data,
   struct zxdg_output_v1 *xdg_output, int32_t width, int32_t height) {
   ssize_t i = 0;
+  bool output_handled = false;
 
   assert(width >= 0);
   assert(height >= 0);
@@ -824,10 +847,13 @@ static void xdg_output_handle_logical_size(__attribute__((unused)) void *data,
     if (state.xdg_outputs[i] == xdg_output) {
       state.pending_output_geometries[i]->width = width;
       state.pending_output_geometries[i]->height = height;
-      state.xdg_output_reconfig_flags[i] = true;
+      state.output_config_flag_list[i] = true;
+      output_handled = true;
       break;
     }
   }
+
+  assert(output_handled);
 }
 
 static void xdg_output_info_done(__attribute__((unused)) void *data,
@@ -858,7 +884,7 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
   struct drawable_layer *layer = NULL;
   struct output_geometry *geometry = NULL;
   ssize_t i = 0;
-  int shm_fd = 0;
+  int shm_fd = -1;
   struct wl_region *zeroed_region = NULL;
 
   assert(should_draw_cursor);
@@ -867,47 +893,26 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
     if (state.layers[i]) {
       if (state.layers[i]->layer_surface == layer_surface) {
         layer = state.layers[i];
-        /*
-         * The layer might already be initialized (if, for instance, one of the
-         * screens was resized), so free any previously allocated resources.
-         */
-        if (layer->pixbuf != NULL) {
-          munmap(layer->pixbuf, (size_t)(layer->size) * MAX_UNRELEASED_FRAMES);
-          layer->pixbuf = NULL;
-        }
-        if (layer->shm_pool != NULL) {
-          /*
-           * This is safe even if some buffers in this pool haven't been freed
-           * yet, as "The mmapped memory will be released when all buffers that
-           * have been created from this pool are gone." See:
-           * https://wayland.app/protocols/wayland#wl_shm_pool:request:destroy
-           */
-          wl_shm_pool_destroy(layer->shm_pool);
-          layer->shm_pool = NULL;
-        }
-        /*
-         * Use the pending output geometry here, as it likely contains an
-         * up-to-date size for the display in the event we aren't given a size
-         * hint by the compositor. Of course, the compositor *could* send us
-         * a layer surface configure event without a size hint and without
-         * telling us the size of the screen yet, but that would be a
-         * compositor bug, and in such a scenario the virtual cursor just won't
-         * be drawn when the mouse moves into an area we didn't allocate layer
-         * space for.
-         */
-        geometry = state.pending_output_geometries[i];
         break;
       }
     }
   }
   assert(layer != NULL);
+
+  /*
+   * Use the pending output geometry here, as it likely contains an up-to-date
+   * size for the display in the event we aren't given a size hint by the
+   * compositor. Of course, the compositor *could* send us a layer surface
+   * configure event without a size hint and without telling us the size of the
+   * screen yet, but that would be a compositor bug, and in such a scenario the
+   * virtual cursor just won't be drawn when the mouse moves into an area we
+   * didn't allocate layer space for.
+   */
+  geometry = state.pending_output_geometries[i];
   assert(geometry != NULL);
   if (width == 0) {
     if (geometry->width <= 0) {
-      /* Skip this configure event, compositor hasn't given us enough info.
-       * The frame memory was already freed above, so mark the layer
-       * unconfigured -- otherwise draw_frame would deref the freed pixbuf. */
-      layer->layer_surface_configured = false;
+      /* Skip this configure event, compositor hasn't given us enough info. */
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
@@ -915,7 +920,6 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
   }
   if (height == 0) {
     if (geometry->height <= 0) {
-      layer->layer_surface_configured = false;
       zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
       return;
     }
@@ -925,32 +929,55 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
   assert(height <= INT32_MAX);
   assert(width > 0);
   assert(height > 0);
+
+  /*
+   * The layer might already be initialized (if, for instance, one of the
+   * screens was resized), so free any previously allocated resources.
+   */
+  if (layer->pixbuf != NULL) {
+    if (munmap(layer->pixbuf,
+      (size_t)(layer->size) * MAX_UNRELEASED_FRAMES) == -1) {
+      assert(false);
+    }
+    layer->pixbuf = NULL;
+  }
+  if (layer->shm_pool != NULL) {
+    /*
+     * This is safe even if some buffers in this pool haven't been freed yet,
+     * as "The mmapped memory will be released when all buffers that have been
+     * created from this pool are gone." See:
+     * https://wayland.app/protocols/wayland#wl_shm_pool:request:destroy
+     */
+    wl_shm_pool_destroy(layer->shm_pool);
+    layer->shm_pool = NULL;
+  }
+
   layer->width = (int32_t)(width);
   layer->height = (int32_t)(height);
   layer->stride = (int32_t)(width * 4);
   layer->size = layer->stride * layer->height;
-  assert(layer->size >= 0);
-  assert(layer->size <= INT32_MAX / MAX_UNRELEASED_FRAMES);
+  assert(layer->size > 0);
   shm_fd = allocate_shm(layer->size * MAX_UNRELEASED_FRAMES);
   layer->pixbuf = mmap(NULL, (size_t)(layer->size * MAX_UNRELEASED_FRAMES),
     PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if (layer->pixbuf == MAP_FAILED) {
-    safe_close(shm_fd);
-    fprintf(stderr,
-      "FATAL ERROR: Failed to map shared memory block for frame: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Failed to map shared memory block for frame");
   }
   layer->shm_pool = wl_shm_create_pool(state.shm, shm_fd,
     layer->size * MAX_UNRELEASED_FRAMES);
+  if (!layer->shm_pool) {
+    err(1, "FATAL ERROR: Could not get wl_shm_pool");
+  }
   /*
-   * Both the client and the server have now mmap'd the file, and `man 2 mmap`
-   * states that "After the mmap() call has returned, the file descriptor, fd,
-   * can be closed immediately without invalidating the mapping."
+   * TODO: This might not be safe, the compositor might not have mmapped the
+   * fd yet.
    */
-  safe_close(shm_fd);
+  safe_close(shm_fd, "Wayland pixbuf shm");
 
   zeroed_region = wl_compositor_create_region(state.compositor);
+  if (!zeroed_region) {
+    err(1, "FATAL ERROR: Failed to get wl_region");
+  }
   wl_region_add(zeroed_region, 0, 0, 0, 0);
   wl_surface_set_input_region(layer->surface, zeroed_region);
 
@@ -985,7 +1012,7 @@ static void wl_buffer_release(__attribute__((unused)) void *data,
         /* Blank out the location where the cursor was drawn previously */
         draw_block(
           state.layers[i]->pixbuf,
-          (state.layers[i]->size * j) / 4,
+          (state.layers[i]->size * j) / (int32_t)(sizeof(uint32_t)),
           state.layers[i]->cursor_x_pos_list[j],
           state.layers[i]->cursor_y_pos_list[j],
           state.layers[i]->width,
@@ -997,6 +1024,11 @@ static void wl_buffer_release(__attribute__((unused)) void *data,
       }
     }
   }
+
+  /*
+   * Buffers that can't be found are tolerated, since we may have destroyed the
+   * screen the buffer originated from already.
+   */
   wl_buffer_destroy(buffer);
 }
 
@@ -1005,11 +1037,10 @@ static void wl_buffer_release(__attribute__((unused)) void *data,
 /************************/
 
 static int open_wl_sock(void) {
-  char *wl_sock_path = NULL;
+  const char *wl_sock_path = NULL;
   bool should_free_wl_sock_path = false;
-  int wl_sock_fd = 0;
-  char *wayland_display_env = NULL;
-  bool should_free_wayland_display_env = false;
+  int wl_sock_fd = -1;
+  const char *wayland_display_env = NULL;
   struct sockaddr_un wl_sockaddr = { 0 };
   int connect_success = 0;
 
@@ -1021,76 +1052,57 @@ static int open_wl_sock(void) {
 
   wayland_display_env = getenv("WAYLAND_DISPLAY");
   if (wayland_display_env == NULL) {
-    wayland_display_env = safe_strdup("wayland-0");
-    should_free_wayland_display_env = true;
+    wayland_display_env = "wayland-0";
   }
 
   if (wayland_display_env[0] == '/') {
     wl_sock_path = wayland_display_env;
   } else {
-    char *xdg_runtime_dir_env = getenv("XDG_RUNTIME_DIR");
-    bool should_free_xdg_runtime_dir_env = false;
+    const char *xdg_runtime_dir_env = getenv("XDG_RUNTIME_DIR");
 
     if (xdg_runtime_dir_env == NULL) {
-      fprintf(stderr,
-        "WARNING: Wayland socket path is relative and XDG_RUNTIME_DIR is not set!\n");
-      xdg_runtime_dir_env = safe_strdup("/run/user/1000");
-      should_free_xdg_runtime_dir_env = true;
+      warnx("WARNING: Wayland socket path is relative and XDG_RUNTIME_DIR is not set, exiting");
+      send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
+      exit(0);
     }
 
     if (xdg_runtime_dir_env[0] != '/') {
-      fprintf(stderr,
-        "WARNING: Wayland socket path is relative and XDG_RUNTIME_DIR is also relative!\n");
-      xdg_runtime_dir_env = safe_strdup("/run/user/1000");
-      should_free_xdg_runtime_dir_env = true;
+      warnx("WARNING: Wayland socket path is relative and XDG_RUNTIME_DIR is also relative, exiting");
+      send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
+      exit(0);
     }
 
     wl_sock_path = sgenprintf(NULL, "%s/%s", xdg_runtime_dir_env,
       wayland_display_env);
     should_free_wl_sock_path = true;
-
-    if (should_free_wayland_display_env) {
-      free(wayland_display_env);
-    }
-    if (should_free_xdg_runtime_dir_env) {
-      free(xdg_runtime_dir_env);
-    }
   }
 
   if (strlen(wl_sock_path) > (sizeof(wl_sockaddr.sun_path) - 1)) {
-    fprintf(stderr, "FATAL ERROR: Path to Wayland socket is too long!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Path to Wayland socket is too long");
   }
 
-  wl_sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  wl_sock_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (wl_sock_fd == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not create UNIX socket: %s\n", strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not create UNIX socket");
   }
   wl_sockaddr.sun_family = AF_UNIX;
-  /* Length already validated above; snprintf bounds the copy by the destination
-   * size regardless, so a tainted path can never overflow sun_path. */
-  snprintf(wl_sockaddr.sun_path, sizeof(wl_sockaddr.sun_path), "%s",
-    wl_sock_path);
+  strncpy(wl_sockaddr.sun_path, wl_sock_path, sizeof(wl_sockaddr.sun_path) - 1);
 
   connect_success = connect(wl_sock_fd,
     (const struct sockaddr *)(&wl_sockaddr), sizeof(wl_sockaddr));
   if (connect_success == -1) {
-    /* The compositor socket is absent/unreachable. Mirror the display/registry
-     * failures in applayer_wayland_init: report the Wayland connection as lost
-     * to the parent and exit cleanly, so the parent can honor its degraded mode
-     * (skip the grab, await the escape combo) instead of seeing a POLLHUP on
-     * the child pipe and aborting early init. */
-    fprintf(stderr,
-      "WARNING: Could not connect to Wayland compositor: %s\n",
-      strerror(errno));
-    send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
-    exit(0);
+    err(1, "FATAL ERROR: Could not connect to Wayland compositor");
   }
 
   if (should_free_wl_sock_path) {
+    /*
+     * Freeing a pointer to const is a perfectly valid operation when it is
+     * dynamically allocated.
+     */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdiscarded-qualifiers"
     free(wl_sock_path);
+#pragma GCC diagnostic pop
   }
 
   return wl_sock_fd;
@@ -1100,43 +1112,44 @@ static void drop_capabilities(void) {
   cap_t no_cap;
   no_cap = cap_init();
   if (no_cap == NULL) {
-    fprintf(stderr, "FATAL ERROR: Cannot create empty capability set: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Cannot create empty capability set");
   }
   if (cap_reset_ambient() == -1) {
-    fprintf(stderr, "FATAL ERROR: Cannot drop ambient capabilities: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Cannot drop ambient capabilities");
   }
   if (cap_set_proc(no_cap) == -1) {
-    fprintf(stderr, "FATAL ERROR: Cannot drop capabilities: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Cannot drop capabilities");
   }
   if (cap_free(no_cap) == -1) {
-    fprintf(stderr, "FATAL ERROR: Cannot free empty capability struct: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Cannot free empty capability struct");
   }
 }
 
 static void init_new_display(ssize_t disp_idx) {
-  state.layers[disp_idx] = allocate_drawable_layer(state.outputs[disp_idx]);
+  if (should_draw_cursor) {
+    state.layers[disp_idx] = allocate_drawable_layer(state.outputs[disp_idx]);
+  }
   state.xdg_outputs[disp_idx] = zxdg_output_manager_v1_get_xdg_output(
     state.xdg_output_manager, state.outputs[disp_idx]);
-  zxdg_output_v1_add_listener(state.xdg_outputs[disp_idx],
-    &xdg_output_listener, &state);
-  wl_output_add_listener(state.outputs[disp_idx], &output_listener,
-    &state);
+  if (!state.xdg_outputs[disp_idx]) {
+    err(1, "FATAL ERROR: Could not get zxdg_output_v1");
+  }
+  if (zxdg_output_v1_add_listener(state.xdg_outputs[disp_idx],
+    &xdg_output_listener, NULL) == -1) {
+    assert(false);
+  }
+  if (wl_output_add_listener(state.outputs[disp_idx], &output_listener,
+    NULL) == -1) {
+    assert(false);
+  }
   state.pending_output_geometries[disp_idx] = safe_calloc(1,
     sizeof(struct output_geometry));
 }
 
 static void send_pointer_space_data(void) {
   struct coord pointer_space_data = {
-    .x = state.global_space_width,
-    .y = state.global_space_height,
+    .x = state.pointer_space_width,
+    .y = state.pointer_space_height,
   };
   send_msg_to_peer(CTP_PACKET_POINTER_SPACE_DATA, 1, &pointer_space_data);
 }
@@ -1146,7 +1159,8 @@ static void display_sync_maybe(void) {
   ssize_t i = 0;
 
   for (i = 0; i < MAX_SCREEN_COUNT; i++) {
-    if (state.xdg_output_reconfig_flags[i]) {
+    if (state.output_config_flag_list[i]) {
+      /* Displays are mid-reconfiguration, skip sync for now */
       should_sync_displays = false;
       break;
     }
@@ -1158,12 +1172,22 @@ static void display_sync_maybe(void) {
 
   for (i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (state.wl_output_remove_flags[i]) {
-      struct drawable_layer *layer = state.layers[i];
-
-      if (layer->layer_surface != NULL) {
-        assert(should_draw_cursor);
+      if (should_draw_cursor) {
+        struct drawable_layer *layer = state.layers[i];
         zwlr_layer_surface_v1_destroy(layer->layer_surface);
+        wl_surface_destroy(layer->surface);
+        if (layer->layer_surface_configured) {
+          assert(layer->size > 0);
+          if (munmap(layer->pixbuf,
+            (size_t)(layer->size) * MAX_UNRELEASED_FRAMES) == -1) {
+            assert(false);
+          }
+          wl_shm_pool_destroy(layer->shm_pool);
+        }
+        free(layer);
+        state.layers[i] = NULL;
       }
+
       wl_output_release(state.outputs[i]);
       state.outputs[i] = NULL;
       state.output_names[i] = 0;
@@ -1173,22 +1197,6 @@ static void display_sync_maybe(void) {
       state.pending_output_geometries[i] = NULL;
       free(state.output_geometries[i]);
       state.output_geometries[i] = NULL;
-      if (layer->surface != NULL) {
-        assert(should_draw_cursor);
-        wl_surface_destroy(layer->surface);
-      }
-      if (layer->pixbuf != NULL) {
-        assert(should_draw_cursor);
-        assert(layer->size >= 0);
-        munmap(layer->pixbuf,
-          (size_t)(layer->size) * MAX_UNRELEASED_FRAMES);
-      }
-      if (layer->shm_pool != NULL) {
-        assert(should_draw_cursor);
-        wl_shm_pool_destroy(layer->shm_pool);
-      }
-      free(layer);
-      state.layers[i] = NULL;
       state.wl_output_remove_flags[i] = false;
     } else {
       struct output_geometry *geometry
@@ -1206,13 +1214,7 @@ static void display_sync_maybe(void) {
   }
 
   if (!recalc_global_space()) {
-    fprintf(stderr,
-      "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.\n");
-    exit(1);
-  }
-
-  if (can_send_pointer_space_data) {
-    send_pointer_space_data();
+    errx(1, "FATAL ERROR: Multiple screens are attached and gaps are present between them. kloak cannot operate in this configuration.");
   }
 }
 
@@ -1232,8 +1234,6 @@ static bool recalc_global_space(void) {
   struct output_geometry *conn_screen_list[MAX_SCREEN_COUNT];
   ssize_t conn_screen_list_len = 0;
   bool screen_in_conn_list = false;
-  struct output_geometry *conn_screen = NULL;
-  struct output_geometry *cur_screen = NULL;
 
   for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (!state.output_geometries[i]) {
@@ -1243,10 +1243,7 @@ static bool recalc_global_space(void) {
     cur_geom_y = state.output_geometries[i]->y;
     cur_geom_width = state.output_geometries[i]->width;
     cur_geom_height = state.output_geometries[i]->height;
-    if (cur_geom_width < 0 || cur_geom_height < 0) {
-      continue;
-    }
-    if (cur_geom_width == 0 && cur_geom_height == 0) {
+    if (cur_geom_width <= 0 || cur_geom_height <= 0) {
       /*
        * labwc will send two wl_output::done events for each display, once
        * before we get position/size information from the XDG output protocol,
@@ -1308,30 +1305,35 @@ static bool recalc_global_space(void) {
       if (screen_in_conn_list) {
         continue;
       }
-      conn_screen = conn_screen_list[i];
-      cur_screen = screen_list[j];
-      if (check_screen_touch(*conn_screen, *cur_screen)) {
+      if (check_screen_touch(*(conn_screen_list[i]), *(screen_list[j]))) {
         /* Found a touching screen! */
-        conn_screen_list[conn_screen_list_len] = cur_screen;
+        conn_screen_list[conn_screen_list_len] = screen_list[j];
         conn_screen_list_len++;
       }
     }
   }
 
   if (conn_screen_list_len != screen_list_len) {
-    /* Debugging. */
-    /*printf("Map of display geometries:\n");
-    for (ssize_t z = 0; z < screen_list_len; z++) {
-      printf("Screen %ld: x = %d, y = %d, width = %d, height = %d\n",
-        z, screen_list[z]->x, screen_list[z]->y, screen_list[z]->width, screen_list[z]->height);
-    }*/
+    /* Debugging.
+     *
+     * warnx("DEBUG: Map of display geometries");
+     * for (ssize_t z = 0; z < screen_list_len; z++) {
+     *   warnx("DEBUG:   Screen %ld: x = %d, y = %d, width = %d, height = %d",
+     *     z, screen_list[z]->x, screen_list[z]->y, screen_list[z]->width, screen_list[z]->height);
+     * }
+     */
     return false;
   }
 
-  state.global_space_width = br_corner_x - ul_corner_x;
-  state.global_space_height = br_corner_y - ul_corner_y;
+  state.pointer_space_width = br_corner_x - ul_corner_x;
+  state.pointer_space_height = br_corner_y - ul_corner_y;
   state.pointer_space_x = ul_corner_x;
   state.pointer_space_y = ul_corner_y;
+
+  if (can_send_pointer_space_data) {
+    send_pointer_space_data();
+  }
+
   return true;
 }
 
@@ -1340,37 +1342,40 @@ static struct drawable_layer *allocate_drawable_layer(
   struct drawable_layer *layer = safe_calloc(1, sizeof(struct drawable_layer));
   ssize_t i = 0;
 
+  assert(should_draw_cursor);
+
   layer->last_drawn_cursor_x = -1;
   layer->last_drawn_cursor_y = -1;
   for (i = 0; i < MAX_UNRELEASED_FRAMES; i++) {
     layer->cursor_x_pos_list[i] = -1;
     layer->cursor_y_pos_list[i] = -1;
   }
-  layer->output = output;
 
-  if (should_draw_cursor) {
-    layer->frame_pending = true;
-    layer->surface = wl_compositor_create_surface(state.compositor);
-    if (!layer->surface) {
-      fprintf(stderr, "FATAL ERROR: Could not create Wayland surface!\n");
-      exit(1);
-    }
-    layer->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-      state.layer_shell, layer->surface, layer->output,
-      ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "com.kicksecure.kloak");
-    zwlr_layer_surface_v1_add_listener(layer->layer_surface,
-      &layer_surface_listener, &state);
-
-    zwlr_layer_surface_v1_set_anchor(
-      layer->layer_surface,
-      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-      ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
-      ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
-      ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT
-    );
-    zwlr_layer_surface_v1_set_exclusive_zone(layer->layer_surface, -1);
-    wl_surface_commit(layer->surface);
+  layer->frame_pending = true;
+  layer->surface = wl_compositor_create_surface(state.compositor);
+  if (!layer->surface) {
+    err(1, "FATAL ERROR: Could not create wl_surface");
   }
+  layer->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+    state.layer_shell, layer->surface, output,
+    ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "com.kicksecure.kloak");
+  if (!layer->layer_surface) {
+    err(1, "FATAL ERROR: Could not create zwlr_layer_surface_v1");
+  }
+  if (zwlr_layer_surface_v1_add_listener(layer->layer_surface,
+    &layer_surface_listener, NULL) == -1) {
+    assert(false);
+  }
+
+  zwlr_layer_surface_v1_set_anchor(
+    layer->layer_surface,
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT
+  );
+  zwlr_layer_surface_v1_set_exclusive_zone(layer->layer_surface, -1);
+  wl_surface_commit(layer->surface);
 
   return layer;
 }
@@ -1389,7 +1394,7 @@ static void draw_frame(struct drawable_layer *layer) {
   int32_t chosen_frame_idx = -1;
   int32_t frame_idx = 0;
   struct wl_buffer *buffer = NULL;
-  struct screen_local_coord scr_coord = { 0 };
+  struct screen_local_coord scr_coord = EMPTY_SCREEN_LOCAL_COORD;
   bool cursor_is_on_layer = false;
   ssize_t layer_idx = 0;
 
@@ -1411,21 +1416,17 @@ static void draw_frame(struct drawable_layer *layer) {
     return;
   }
 
-  layer->frame_pending = false;
-
   assert(layer->size >= 0);
   assert(chosen_frame_idx >= 0);
   assert((layer->size * chosen_frame_idx)
     < (layer->size * MAX_UNRELEASED_FRAMES));
-  buffer = wl_shm_pool_create_buffer(layer->shm_pool,
-    layer->size * chosen_frame_idx, layer->width, layer->height,
-    layer->stride, WL_SHM_FORMAT_ARGB8888);
+
+  layer->frame_pending = false;
 
   scr_coord = abs_coord_to_screen_local_coord((int32_t)(cursor_x),
     (int32_t)(cursor_y));
-
   cursor_is_on_layer = false;
-  if (scr_coord.valid) {
+  if (scr_coord.output_idx >= 0) {
     for (layer_idx = 0; layer_idx < MAX_SCREEN_COUNT; layer_idx++) {
       if ((state.layers[layer_idx] == layer)
         && (layer_idx == scr_coord.output_idx)) {
@@ -1448,7 +1449,8 @@ static void draw_frame(struct drawable_layer *layer) {
   }
   if (cursor_is_on_layer) {
     /* Draw crosshairs at the pointer location */
-    draw_block(layer->pixbuf, (layer->size * chosen_frame_idx) / 4,
+    draw_block(layer->pixbuf,
+      (layer->size * chosen_frame_idx) / (int32_t)(sizeof(uint32_t)),
       scr_coord.x, scr_coord.y, layer->width, layer->height, CURSOR_RADIUS,
       true);
     damage_surface_enh(layer->surface, scr_coord.x - CURSOR_RADIUS,
@@ -1456,10 +1458,26 @@ static void draw_frame(struct drawable_layer *layer) {
       2 * CURSOR_RADIUS + 1);
   }
 
-  wl_buffer_add_listener(buffer, &buffer_listener, NULL);
+  /*
+   * Technically we might end up drawing a frame when we drew and damaged
+   * nothing, but this will likely only occur when a new display is plugged in,
+   * so we'll likely lose more performance checking for this case than if we
+   * simply allow it to happen.
+   */
+
+  buffer = wl_shm_pool_create_buffer(layer->shm_pool,
+    layer->size * chosen_frame_idx, layer->width, layer->height,
+    layer->stride, WL_SHM_FORMAT_ARGB8888);
+  if (!buffer) {
+    err(1, "FATAL ERROR: Could not create wl_buffer");
+  }
+  if (wl_buffer_add_listener(buffer, &buffer_listener, NULL) == -1) {
+    assert(false);
+  }
   layer->buffer_list[chosen_frame_idx] = buffer;
   wl_surface_attach(layer->surface, buffer, 0, 0);
   wl_surface_commit(layer->surface);
+
   if (cursor_is_on_layer) {
     layer->last_drawn_cursor_x = scr_coord.x;
     layer->last_drawn_cursor_y = scr_coord.y;
@@ -1472,32 +1490,28 @@ static void draw_frame(struct drawable_layer *layer) {
   layer->frame_in_use[chosen_frame_idx] = true;
 }
 
-static void wl_display_flush_safe(struct wl_display *display) {
+static inline void wl_display_flush_safe(struct wl_display *display) {
   if (wl_display_flush(display) == -1) {
     if (errno == EAGAIN) {
       ev_fds[1].events |= POLLOUT;
     } else {
-      fprintf(stderr,
-        "FATAL ERROR: Could not send data to Wayland server: %s\n",
-        strerror(errno));
-      exit(1);
+      err(1, "FATAL ERROR: Could not send data to Wayland server");
     }
   } else {
     ev_fds[1].events &= ~POLLOUT;
   }
 }
 
-static void wl_display_dispatch_pending_safe(struct wl_display *display) {
+static inline void wl_display_dispatch_pending_safe(
+  struct wl_display *display) {
   if (wl_display_dispatch_pending(display) == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not dispatch Wayland events!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Could not dispatch Wayland events");
   }
 }
 
-static void wl_display_roundtrip_safe(struct wl_display *display) {
+static inline void wl_display_roundtrip_safe(struct wl_display *display) {
   if (wl_display_roundtrip(display) == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not roundtrip Wayland display!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Could not roundtrip Wayland display");
   }
 }
 
@@ -1555,7 +1569,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
   struct coord end = { 0 };
   struct coord prev_trav_coord = { 0 };
   struct coord trav_coord = { 0 };
-  struct screen_local_coord trav_scr_coord = { 0 };
+  struct screen_local_coord trav_scr_coord = EMPTY_SCREEN_LOCAL_COORD;
 
   if (!isfinite(*cursor_x_ptr) || !isfinite(*cursor_y_ptr)) {
     *cursor_x_ptr = prev_cursor_x_pos;
@@ -1589,7 +1603,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
     }
     trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
       trav_coord.y);
-    if (!trav_scr_coord.valid) {
+    if (trav_scr_coord.output_idx < 0) {
       /*
        * Figure out what direction we moved when we went off screen, and move
        * move backwards in that direction, but in only one dimension.
@@ -1597,7 +1611,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
       if (prev_trav_coord.x < trav_coord.x) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x - 1,
           trav_coord.y);
-        if (trav_scr_coord.valid) {
+        if (trav_scr_coord.output_idx >= 0) {
           start.x = trav_coord.x - 1;
           start.y = trav_coord.y;
           end.x = trav_coord.x - 1;
@@ -1608,7 +1622,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
       if (prev_trav_coord.x > trav_coord.x) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x + 1,
           trav_coord.y);
-        if (trav_scr_coord.valid) {
+        if (trav_scr_coord.output_idx >= 0) {
           start.x = trav_coord.x + 1;
           start.y = trav_coord.y;
           end.x = trav_coord.x + 1;
@@ -1619,7 +1633,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
       if (prev_trav_coord.y < trav_coord.y) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
           trav_coord.y - 1);
-        if (trav_scr_coord.valid) {
+        if (trav_scr_coord.output_idx >= 0) {
           start.y = trav_coord.y - 1;
           start.x = trav_coord.x;
           end.y = trav_coord.y - 1;
@@ -1630,7 +1644,7 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
       if (prev_trav_coord.y > trav_coord.y) {
         trav_scr_coord = abs_coord_to_screen_local_coord(trav_coord.x,
           trav_coord.y + 1);
-        if (trav_scr_coord.valid) {
+        if (trav_scr_coord.output_idx >= 0) {
           start.y = trav_coord.y + 1;
           start.x = trav_coord.x;
           end.y = trav_coord.y + 1;
@@ -1642,11 +1656,13 @@ static void make_virtual_cursor_pos_sane(double prev_cursor_x_pos,
        * If all of the above fail, we've gone diagonally off a screen and into
        * compositor global space. Move the cursor back to where it was and
        * stop it. Technically we should also be doing this if two different
-       * directions both work to get us back on-screen, but we don't currently.
-       * The resulting one-pixel shift leaks nothing: kloak obfuscates event
-       * timing, not cursor geometry, and the final cursor position is already
-       * observable to the compositor and every client regardless, so this
-       * corner case gives an attacker nothing they could not otherwise see.
+       * directions both work to get us back on-screen, but we don't currently
+       * and the one-pixel shift resulting from this likely isn't worth caring
+       * about.
+       *
+       * TODO: Is there a reason to care about this one-pixel shift? Does its
+       * existence leak information an attacker wouldn't be able to get
+       * otherwise?
        */
       end.x = prev_trav_coord.x;
       end.y = prev_trav_coord.y;
@@ -1665,7 +1681,7 @@ static struct input_packet *find_merge_target_packet(
 
   /*
    * TAILQ_FOREACH_REVERSE would be useful here, but it is not documented to be
-   * implemented using a loop, therefore it may be unsafe to use 'break;'
+   * implemented using a loop, therefore it may be unsafe to use break
    * statements within it. We implement a loop manually for this reason.
    */
 
@@ -1701,8 +1717,8 @@ static struct input_packet *find_merge_target_packet(
 }
 
 static struct input_packet *update_virtual_cursor(void) {
-  struct screen_local_coord prev_scr_coord = { 0 };
-  struct screen_local_coord scr_coord = { 0 };
+  struct screen_local_coord prev_scr_coord = EMPTY_SCREEN_LOCAL_COORD;
+  struct screen_local_coord scr_coord = EMPTY_SCREEN_LOCAL_COORD;
   struct input_packet *old_ev_packet = NULL;
   struct input_packet *ev_packet = NULL;
 
@@ -1712,23 +1728,19 @@ static struct input_packet *update_virtual_cursor(void) {
   prev_scr_coord = abs_coord_to_screen_local_coord((int32_t)(prev_cursor_x),
     (int32_t)(prev_cursor_y));
 
-  if (!prev_scr_coord.valid || !state.layers[prev_scr_coord.output_idx]) {
+  if (prev_scr_coord.output_idx < 0) {
     /*
-     * We've somehow gotten into a spot where the previous coordinate data
-     * either is invalid or points at an area where there is no screen. Reset
-     * everything in the hopes of recovering sanity.
+     * Previous cursor position is no longer valid. This can happen during
+     * early startup or when a screen is removed. Relocate the cursor to the
+     * upper left corner of an arbitrary screen.
      */
-    fprintf(stderr,
-      "INFO: Previous cursor position no longer valid, resetting.\n");
     for (int32_t i = 0; i < MAX_SCREEN_COUNT; i++) {
-      if (state.layers[i]) {
+      if (state.output_geometries[i]) {
         bool sane_location_valid = false;
         struct coord sane_location = screen_local_coord_to_abs_coord(0, 0, i,
           &sane_location_valid);
 
-        if (!sane_location_valid) {
-          continue;
-        }
+        assert(sane_location_valid);
         assert(sane_location.x <= INT32_MAX && sane_location.x >= INT32_MIN);
         assert(sane_location.y <= INT32_MAX && sane_location.y >= INT32_MIN);
         prev_cursor_x = sane_location.x;
@@ -1737,17 +1749,14 @@ static struct input_packet *update_virtual_cursor(void) {
         cursor_y = sane_location.y;
         prev_scr_coord = abs_coord_to_screen_local_coord(
           (int32_t)(prev_cursor_x), (int32_t)(prev_cursor_y));
-        if (prev_scr_coord.valid && state.layers[prev_scr_coord.output_idx]) {
+        if (prev_scr_coord.output_idx >= 0) {
           break;
         }
-        /* This screen couldn't restore sanity, try the next one. */
+        assert(false);
       }
     }
-    if (!prev_scr_coord.valid || !state.layers[prev_scr_coord.output_idx]) {
-      /*
-       * All attempts at making things sane failed, therefore bail out and
-       * don't create any new input_packet.
-       */
+    if (prev_scr_coord.output_idx < 0) {
+      /* No screens attached, bail out and don't create any new input_packet */
       return NULL;
     }
   }
@@ -1757,11 +1766,23 @@ static struct input_packet *update_virtual_cursor(void) {
 
   assert(isfinite(cursor_x) && cursor_x <= INT32_MAX && cursor_x >= INT32_MIN);
   assert(isfinite(cursor_y) && cursor_y <= INT32_MAX && cursor_y >= INT32_MIN);
+  /*
+   * Exact equality testing is intentional, prev_cursor_* is set from cursor_*
+   * and we are testing for that specific case. There is no risk of rounding
+   * errors causing minor differences.
+   */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wfloat-equal"
+  if (cursor_x == prev_cursor_x && cursor_y == prev_cursor_y) {
+#pragma GCC diagnostic pop
+    return NULL;
+  }
+
   scr_coord = abs_coord_to_screen_local_coord((int32_t)(cursor_x),
     (int32_t)(cursor_y));
 
-  assert(prev_scr_coord.valid);
-  assert(scr_coord.valid);
+  assert(prev_scr_coord.output_idx >= 0);
+  assert(scr_coord.output_idx >= 0);
   if (should_draw_cursor) {
     state.layers[prev_scr_coord.output_idx]->frame_pending = true;
     state.layers[scr_coord.output_idx]->frame_pending = true;
@@ -1823,7 +1844,7 @@ static bool process_parent_message(void) {
   int64_t random_delay = 0;
   msg_obj = get_msg_from_peer(&msg_type, NULL);
 
-  if (msg_type == PTC_PACKET_NONE) {
+  if (msg_type == 0) {
     return false;
   }
 
@@ -1836,10 +1857,10 @@ static bool process_parent_message(void) {
     prev_cursor_y = cursor_y;
     cursor_x += double_coord_ptr->x;
     cursor_y += double_coord_ptr->y;
+    free(msg_obj);
     assert(isfinite(cursor_x));
     assert(isfinite(cursor_y));
     ev_packet = update_virtual_cursor();
-    free(msg_obj);
     if (ev_packet == NULL) {
       return true;
     }
@@ -1853,8 +1874,10 @@ static bool process_parent_message(void) {
     prev_cursor_y = cursor_y;
     cursor_x = double_coord_ptr->x + state.pointer_space_x;
     cursor_y = double_coord_ptr->y + state.pointer_space_y;
-    ev_packet = update_virtual_cursor();
     free(msg_obj);
+    assert(isfinite(cursor_x));
+    assert(isfinite(cursor_y));
+    ev_packet = update_virtual_cursor();
     if (ev_packet == NULL) {
       return true;
     }
@@ -1866,10 +1889,10 @@ static bool process_parent_message(void) {
     assert(isfinite(double_coord_ptr->y));
     vert_scroll_accum += double_coord_ptr->y;
     horiz_scroll_accum += double_coord_ptr->x;
+    free(msg_obj);
     assert(isfinite(vert_scroll_accum));
     assert(isfinite(horiz_scroll_accum));
     ev_packet = update_mouse_scroll();
-    free(msg_obj);
     if (ev_packet == NULL) {
       return true;
     }
@@ -1894,9 +1917,7 @@ static bool process_parent_message(void) {
     break;
 
   default:
-    fprintf(stderr, "FATAL ERROR: Unexpected message type %u from parent!\n",
-      (unsigned int)msg_type);
-    exit(1);
+    errx(1, "FATAL ERROR: Unexpected message type %u from parent", msg_type);
   }
 
   current_time = current_time_ms();
@@ -1924,30 +1945,34 @@ static void release_scheduled_input_events(void) {
   while ((ev_packet = TAILQ_FIRST(&evq_head))
     && (current_time >= ev_packet->sched_time)) {
     assert(ev_packet->sched_time >= 0);
-    if (ev_packet->sched_time > UINT32_MAX) {
-      fprintf(stderr,
-        "INFO: ev_packet->sched_time overflowed maximum value. This is not an error, but kloak must be restarted. Exiting.\n");
-      exit(0);
-    }
+
+    /*
+     * ev_packet->sched_time wraparound during cast to uint32_t is
+     * intentional.
+     */
 
     switch (ev_packet->packet_type) {
     case KLOAK_PACKET_TYPE_MOUSEMOVE:
+      /*
+       * zwlr_virtual_pointer_v1_motion_absolute wants coordinates in pointer
+       * space. while ev_packet stores them in compositor global space. We
+       * cannot convert to pointer space until this moment since a display may
+       * have been removed between when the event was scheduled and when it was
+       * released.
+       */
       pointer_x = ev_packet->data.coord_data.x - state.pointer_space_x;
       pointer_y = ev_packet->data.coord_data.y - state.pointer_space_y;
       if (pointer_x < 0 || pointer_y < 0
-        || pointer_x >= state.global_space_width
-        || pointer_y >= state.global_space_height) {
-        /*
-         * Mouse event is no longer valid, probably due to display state
-         * change.
-         */
+        || pointer_x >= state.pointer_space_width
+        || pointer_y >= state.pointer_space_height) {
+        /* Mouse event is not valid, probably due to display state change. */
         break;
       }
       zwlr_virtual_pointer_v1_motion_absolute(
         state.virt_pointer, (uint32_t)(ev_packet->sched_time),
         (uint32_t)(pointer_x), (uint32_t)(pointer_y),
-        (uint32_t)(state.global_space_width),
-        (uint32_t)(state.global_space_height));
+        (uint32_t)(state.pointer_space_width),
+        (uint32_t)(state.pointer_space_height));
       zwlr_virtual_pointer_v1_frame(state.virt_pointer);
       break;
 
@@ -1995,32 +2020,24 @@ static void release_scheduled_input_events(void) {
       break;
 
     case KLOAK_PACKET_TYPE_CLICK:
-      if (ev_packet->data.button_data.is_pressed) {
-        zwlr_virtual_pointer_v1_button(state.virt_pointer,
-          (uint32_t)(ev_packet->sched_time),
-          ev_packet->data.button_data.button_code,
-          WL_POINTER_BUTTON_STATE_PRESSED);
-      } else {
-        zwlr_virtual_pointer_v1_button(state.virt_pointer,
-          (uint32_t)(ev_packet->sched_time),
-          ev_packet->data.button_data.button_code,
-          WL_POINTER_BUTTON_STATE_RELEASED);
-      }
+      zwlr_virtual_pointer_v1_button(state.virt_pointer,
+        (uint32_t)(ev_packet->sched_time),
+        ev_packet->data.button_data.button_code,
+        ev_packet->data.button_data.is_pressed
+          ? WL_POINTER_BUTTON_STATE_PRESSED
+          : WL_POINTER_BUTTON_STATE_RELEASED);
       zwlr_virtual_pointer_v1_frame(state.virt_pointer);
       break;
 
     case KLOAK_PACKET_TYPE_KB:
       button_code = ev_packet->data.button_data.button_code;
       is_pressed = ev_packet->data.button_data.is_pressed;
-      if (is_pressed) {
-        /*
-         * XKB keycodes == evdev keycodes + 8. Why this design decision was
-         * made, I have no idea.
-         */
-        xkb_state_update_key(state.xkb_state, button_code + 8, XKB_KEY_DOWN);
-      } else {
-        xkb_state_update_key(state.xkb_state, button_code + 8, XKB_KEY_UP);
-      }
+      /*
+       * XKB keycodes == evdev keycodes + 8. Why this design decision was
+       * made, I have no idea.
+       */
+      xkb_state_update_key(state.xkb_state, button_code + 8,
+        is_pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
       depressed_mods = xkb_state_serialize_mods(
         state.xkb_state, XKB_STATE_MODS_DEPRESSED);
       latched_mods = xkb_state_serialize_mods(
@@ -2029,8 +2046,17 @@ static void release_scheduled_input_events(void) {
         state.xkb_state, XKB_STATE_MODS_LOCKED);
       effective_group = xkb_state_serialize_layout(
         state.xkb_state, XKB_STATE_LAYOUT_EFFECTIVE);
-      zwp_virtual_keyboard_v1_modifiers(state.virt_kb, depressed_mods,
-        latched_mods, locked_mods, effective_group);
+      if (depressed_mods != last_depressed_mods
+        || latched_mods != last_latched_mods
+        || locked_mods != last_locked_mods
+        || effective_group != last_effective_group) {
+        zwp_virtual_keyboard_v1_modifiers(state.virt_kb, depressed_mods,
+          latched_mods, locked_mods, effective_group);
+        last_depressed_mods = depressed_mods;
+        last_latched_mods = latched_mods;
+        last_locked_mods = locked_mods;
+        last_effective_group = effective_group;
+      }
       zwp_virtual_keyboard_v1_key(state.virt_kb,
         (uint32_t)(ev_packet->sched_time), button_code, is_pressed
           ? WL_KEYBOARD_KEY_STATE_PRESSED : WL_KEYBOARD_KEY_STATE_RELEASED);
@@ -2067,14 +2093,12 @@ static void applayer_config_init(void) {
     msg_obj = get_msg_from_peer(&msg_type, NULL);
 
     switch (msg_type) {
-    case PTC_PACKET_NONE:
+    case 0:
       continue;
 
     case PTC_PACKET_MAX_DELAY_CONFIG:
       if (max_delay_received) {
-        fprintf(stderr,
-          "FATAL ERROR: Received PTC_PACKET_MAX_DELAY_CONFIG twice!\n");
-        exit(1);
+        errx(1, "FATAL ERROR: Received PTC_PACKET_MAX_DELAY_CONFIG twice");
       }
       memcpy(&max_delay, msg_obj, sizeof(int32_t));
       max_delay_received = true;
@@ -2082,9 +2106,7 @@ static void applayer_config_init(void) {
 
     case PTC_PACKET_CURSOR_COLOR_CONFIG:
       if (cursor_color_received) {
-        fprintf(stderr,
-          "FATAL ERROR: Recived PTC_PACKET_CURSOR_COLOR_CONFIG twice!\n");
-        exit(1);
+        errx(1, "FATAL ERROR: Recived PTC_PACKET_CURSOR_COLOR_CONFIG twice");
       }
       memcpy(&cursor_color, msg_obj, sizeof(uint32_t));
       if ((cursor_color >> 24) == 0) {
@@ -2095,9 +2117,7 @@ static void applayer_config_init(void) {
       break;
 
     default:
-      fprintf(stderr, "FATAL ERROR: Unexpected message type %u from parent!\n",
-        (unsigned int)msg_type);
-      exit(1);
+      errx(1, "FATAL ERROR: Unexpected message type %u from parent", msg_type);
     }
 
     free(msg_obj);
@@ -2114,8 +2134,6 @@ static void applayer_sandbox_init(void) {
   struct group *gr_data = NULL;
   pid_t fork_pid = 0;
   struct rlimit rl_data = { 0 };
-  pid_t wait_ret = 0;
-  int wait_status = 0;
   const char *xkb_path_component_list[] = {
     "/tmp", "/usr", "/share", "/X11", "/xkb", NULL
   };
@@ -2129,97 +2147,60 @@ static void applayer_sandbox_init(void) {
    * binary.
    */
   if (prctl(PR_SET_NO_NEW_PRIVS, 1L, 0L, 0L, 0L) == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not set PR_SET_NO_NEW_PRIVS: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not set PR_SET_NO_NEW_PRIVS");
   }
 
   /* Close all open file descriptors above CHILD_FD_WLSOCK. */
   if (close_range(CHILD_FD_WLSOCK + 1, ~0U, CLOSE_RANGE_UNSHARE) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Failed to close unneeded fds!\n");
-    exit(1);
+    err(1, "FATAL ERROR: Failed to close unneeded fds");
   }
 
   /* Disable core dumps. */
   rl_data.rlim_cur = 0;
   rl_data.rlim_max = 0;
   if (setrlimit(RLIMIT_CORE, &rl_data) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Failed to zero core dump size limits: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Failed to zero core dump size limits");
   }
 
-  /*
-   * Change our user and group to kloakwl/kloakwl. This is better than
-   * changing to nobody/nogroup, since nobody/nogroup allows anything else
-   * running as nobody/nogroup to kill us. We get the user and group data
-   * separately so that if the user has done something weird and set the UID
-   * for the 'kloakwl' user to something different than the 'kloakwl' group,
-   * it doesn't open up a compromise. We also don't allow tricking the
-   * application into keeping root privileges by messing with the 'kloakwl'
-   * UID/GID.
-   */
+  /* Get the UID/GID for a dedicated user and group. */
   errno = 0;
-  pw_data = getpwnam("kloakwl");
+  pw_data = getpwnam(SANDBOX_DEDICATED_USER);
   if (pw_data == NULL) {
     if (errno == 0) {
-      fprintf(stderr, "FATAL ERROR: User 'kloakwl' does not exist!\n");
-    } else {
-      fprintf(stderr,
-        "FATAL ERROR: Could not get user information for 'kloakwl': %s\n",
-        strerror(errno));
+      errx(1, "FATAL ERROR: User '" SANDBOX_DEDICATED_USER "' does not exist");
     }
-    exit(1);
+    err(1, "FATAL ERROR: Could not get user information for '" SANDBOX_DEDICATED_USER "'");
   }
   if (pw_data->pw_uid == 0) {
-    fprintf(stderr,
-      "FATAL ERROR: 'kloakwl' UID is 0 (root), refusing to continue.");
-    exit(1);
+    errx(1, "FATAL ERROR: '" SANDBOX_DEDICATED_USER "' UID is 0 (root), refusing to continue");
   }
   errno = 0;
-  gr_data = getgrnam("kloakwl");
+  gr_data = getgrnam(SANDBOX_DEDICATED_USER);
   if (gr_data == NULL) {
     if (errno == 0) {
-      fprintf(stderr, "FATAL ERROR: Group 'kloakwl' does not exist!\n");
-    } else {
-      fprintf(stderr,
-        "FATAL ERROR: Could not get group information for 'kloakwl': %s\n",
-        strerror(errno));
+      errx(1, "FATAL ERROR: Group '" SANDBOX_DEDICATED_USER "' does not exist");
     }
-    exit(1);
+    err(1, "FATAL ERROR: Could not get group information for '" SANDBOX_DEDICATED_USER "'");
   }
   if (gr_data->gr_gid == 0) {
-    fprintf(stderr,
-      "FATAL ERROR: 'kloakwl' GID is 0 (root), refusing to continue.");
-    exit(1);
-  }
-  /* Drop supplementary groups. */
-  if (setgroups(0, NULL) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not drop supplementary groups; %s\n",
-      strerror(errno));
-    exit(1);
-  }
-  /* Set our GID to kloakwl, this MUST be done before setting the UID */
-  if (setresgid(gr_data->gr_gid, gr_data->gr_gid, gr_data->gr_gid) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not change group to 'kloakwl': %s\n",
-      strerror(errno));
-    exit(1);
-  }
-  /* Set our UID to kloakwl */
-  if (setresuid(pw_data->pw_uid, pw_data->pw_uid, pw_data->pw_uid) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not change user to 'kloakwl': %s\n",
-      strerror(errno));
-    exit(1);
+    errx(1, "FATAL ERROR: '" SANDBOX_DEDICATED_USER "' GID is 0 (root), refusing to continue");
   }
 
-  /*
-   * Drop all capabilities in our current namespace.
-   */
+  /* Drop supplementary groups. */
+  if (setgroups(0, NULL) == -1) {
+    err(1, "FATAL ERROR: Could not drop supplementary groups");
+  }
+
+  /* Set GID to a dedicated group, this MUST be done before setting the UID */
+  if (setresgid(gr_data->gr_gid, gr_data->gr_gid, gr_data->gr_gid) == -1) {
+    err(1, "FATAL ERROR: Could not change group to '" SANDBOX_DEDICATED_USER "'");
+  }
+  /* Set our UID to a dedicated user */
+  if (setresuid(pw_data->pw_uid, pw_data->pw_uid, pw_data->pw_uid) == -1) {
+    err(1, "FATAL ERROR: Could not change user to '" SANDBOX_DEDICATED_USER "'");
+  }
+
+  /* Drop all capabilities in our current namespace. */
   drop_capabilities();
 
   /*
@@ -2229,23 +2210,18 @@ static void applayer_sandbox_init(void) {
    * to drop capabilities again after doing this.
    *
    * WARNING 2: Not all of the options to unshare actually put the calling
-   * process into the new sandbox! We have to fork(), let the parent die, and
-   * continue all work in the child to fully enter the sandbox.
+   * process into the new sandbox! We have to fork() and continue all work in
+   * the child to fully enter the sandbox.
    */
   if (unshare(CLONE_NEWUSER | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWIPC
     | CLONE_NEWPID | CLONE_NEWUTS | CLONE_SYSVSEM | CLONE_NEWCGROUP
     | CLONE_NEWTIME) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not enter unshare sandbox: %s\n", strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not enter unshare sandbox");
   }
 
   /* Make the mount namespace stronger by preventing mount propagation. */
   if (mount("", "/", "", MS_PRIVATE | MS_REC, NULL) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not strengthen mount namespace: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not strengthen mount namespace");
   }
 
   /*
@@ -2260,34 +2236,19 @@ static void applayer_sandbox_init(void) {
   change_dumpable(false);
 
   /*
-   * Unmount /proc, we don't need it and may as well get it out of our mount
-   * namespace.
+   * The host's /proc cannot be unmounted here, as its mount is "locked" when
+   * entering a new user + mount namespace. It ends up being hidden anyway, so
+   * this is not a problem.
    */
-  if (umount("/proc") == -1 && errno != EINVAL) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not unmount /proc in sandbox: %s\n",
-      strerror(errno));
-    exit(1);
-  }
 
-  /*
-   * Mount a small, empty tmpfs to /tmp. This will hide the contents of /tmp
-   * from the process, give us a safe place to pivot root into, and allow us to
-   * allocate shared memory safely. The tmpfs is 532 M in size to accomodate up
-   * to four 8K displays with 32-bit ARGB pixels.
-   */
+  /* Prep a tmpfs for use as our new root. */
   if (mount("newroot", "/tmp", "tmpfs",
     MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOSYMFOLLOW,
-    "size=532M,mode=700") == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not set up safe chroot zone: %s\n", strerror(errno));
-    exit(1);
+    "size=" SHM_TMPFS_SIZE ",mode=700") == -1) {
+    err(1, "FATAL ERROR: Could not set up safe chroot zone");
   }
   if (chdir("/tmp") == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not chdir to safe chroot zone: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not chdir to safe chroot zone");
   }
 
   /* Create a shared memory allocation dir. */
@@ -2297,10 +2258,7 @@ static void applayer_sandbox_init(void) {
   safe_mkdir_p(xkb_path_component_list);
   if (mount("/usr/share/X11/xkb", "/tmp/usr/share/X11/xkb", "",
     MS_BIND, NULL) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not bind-mount XKB data into sandbox: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not bind-mount XKB data into sandbox");
   }
 
   /*
@@ -2309,21 +2267,16 @@ static void applayer_sandbox_init(void) {
    */
   if (mount("", "/tmp/usr/share/X11/xkb", "", MS_REMOUNT | MS_BIND | MS_RDONLY,
     NULL) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not make XKB bind-mount read-only: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not make XKB bind-mount read-only");
   }
 
   /*
-   * Pivot into the tmpfs we just made. The filesystem will still be there, but
-   * we will be able to unmount it to trap ourselves in the safe directory.
+   * Pivot into the tmpfs we just made. The original filesystem will still be
+   * there, but we will be able to unmount it to trap ourselves in the safe
+   * directory.
    */
   if (syscall(SYS_pivot_root, ".", ".") == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not pivot into safe root directory: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not pivot into safe root directory");
   }
 
   /*
@@ -2331,57 +2284,28 @@ static void applayer_sandbox_init(void) {
    * directory.
    */
   if (umount2(".", MNT_DETACH) == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not unmount old root directory in sandbox: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not unmount old root directory in sandbox");
   }
 
   /* Switch to the new root directory. */
   if (chdir("/") == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not switch to new root directory: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not switch to new root directory");
   }
 
   /* Drop capabilities again since we regained them when we called unshare. */
   drop_capabilities();
 
   /*
-   * Fork into a child process so that we fully enter the unshare namespace
-   * created earlier.
+   * Fork into a child and exit so that we fully enter the unshare namespace
+   * created earlier. The main kloak process will stay in touch via stdio.
    */
   fork_pid = fork();
   if (fork_pid == -1) {
-    fprintf(stderr,
-      "FATAL ERROR: Could not fork into child process: %s\n",
-      strerror(errno));
-    exit(1);
+    err(1, "FATAL ERROR: Could not fork into child process");
   }
   if (fork_pid != 0) {
-    /* Wait for the child to exit. The child is now fully sandboxed. */
-    wait_ret = waitpid(fork_pid, &wait_status, 0);
-    if (wait_ret == -1) {
-      fprintf(stderr, "FATAL ERROR: Could not wait for child to exit: %s\n",
-        strerror(errno));
-
-      if (kill(fork_pid, SIGKILL) == -1) {
-        fprintf(stderr, "FATAL ERROR: Could not clean up child process: %s\n",
-          strerror(errno));
-        /* no exit, we exit 1 below */
-      }
-      exit(1);
-    }
-
-    if (!WIFEXITED(wait_status)) {
-      fprintf(stderr, "FATAL ERROR: Child process crashed!\n");
-      exit(1);
-    }
-    exit(WEXITSTATUS(wait_status));
+    _exit(0);
   }
-
-  /* NOTE: Code after this point runs in the child process. */
 
   /* Paranoid attempt to again disable core dumps. */
   change_dumpable(false);
@@ -2397,7 +2321,7 @@ static void applayer_wayland_init(void) {
    */
   state.display = wl_display_connect_to_fd(CHILD_FD_WLSOCK);
   if (!state.display) {
-    fprintf(stderr, "WARNING: Could not get Wayland display, exiting.\n");
+    warnx("WARNING: Could not get Wayland display, exiting");
     send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
     exit(0);
   }
@@ -2405,11 +2329,14 @@ static void applayer_wayland_init(void) {
 
   state.registry = wl_display_get_registry(state.display);
   if (!state.registry) {
-    fprintf(stderr, "WARNING: Could not get Wayland registry, existing.\n");
+    warnx("WARNING: Could not get Wayland registry, exiting");
     send_msg_to_peer(CTP_PACKET_WAYLAND_LOST, 0);
     exit(0);
   }
-  wl_registry_add_listener(state.registry, &registry_listener, &state);
+  if (wl_registry_add_listener(state.registry, &registry_listener, NULL)
+    == -1) {
+    assert(false);
+  }
 
   for (i = 0; i < MAX_INIT_ATTEMPTS; i++) {
     wl_display_roundtrip_safe(state.display);
@@ -2435,43 +2362,24 @@ static void applayer_wayland_init(void) {
     }
   }
   if (missing_obj_name != NULL) {
-    fprintf(stderr, "FATAL ERROR: No %s object from compositor!\n",
-      missing_obj_name);
-    exit(1);
+    errx(1, "FATAL ERROR: No %s object from compositor!", missing_obj_name);
   }
 
-  /*
-   * Early init is done, set up things now that we have a good set of starting
-   * objects.
-   */
+  /* Early init is done, set up things now that we have starting objects. */
   did_wayland_init = true;
   state.virt_pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
     state.virt_pointer_manager, NULL);
-  if (state.virt_pointer == NULL) {
-    fprintf(stderr,
-      "FATAL ERROR: No zwlr_virtual_pointer_v1 object from compositor!\n");
-    exit(1);
+  if (!state.virt_pointer) {
+    err(1, "FATAL ERROR: No zwlr_virtual_pointer_v1 object from compositor");
   }
   state.virt_kb = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(
     state.virt_kb_manager, state.seat);
-  /*
-   * The virtual-keyboard-v1 protocol returns 0 when making a new virtual
-   * keyboard if kloak is unauthorized to create a virtual keyboard. However,
-   * the protocol treats this as an enum value, meaning... we have to compare
-   * a pointer to an enum. This is horrible and the protocol really shouldn't
-   * require this, but it does, see
-   * https://wayland.app/protocols/virtual-keyboard-unstable-v1#zwp_virtual_keyboard_manager_v1:request:create_virtual_keyboard
-   */
-  if ((uintptr_t)(state.virt_kb)
-    == (uintptr_t)(ZWP_VIRTUAL_KEYBOARD_MANAGER_V1_ERROR_UNAUTHORIZED)) {
-    fprintf(stderr,
-      "FATAL ERROR: Not authorized to create a virtual keyboard!\n");
-    exit(1);
+  if (!state.virt_kb) {
+    err(1, "FATAL ERROR: No zwp_virtual_keyboard_manager_v1 object from compositor");
   }
   state.xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
   if (!state.xkb_ctx) {
-    fprintf(stderr, "FATAL ERROR: Could not create XKB context!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Could not create XKB context");
   }
   for (i = 0; i < MAX_SCREEN_COUNT; i++) {
     if (state.outputs[i]) {
@@ -2483,11 +2391,22 @@ static void applayer_wayland_init(void) {
    * state.kb is set by the seat_handle_capabilities() function, which is part
    * of the wl_seat listener.
    */
-  wl_seat_add_listener(state.seat, &seat_listener, &state);
-  wl_display_roundtrip_safe(state.display);
-  if (state.kb == NULL) {
-    fprintf(stderr, "FATAL ERROR: No wl_keyboard object from compositor!\n");
-    exit(1);
+  if (wl_seat_add_listener(state.seat, &seat_listener, NULL) == -1) {
+    assert(false);
+  }
+
+  /* Ensure we have both a keyboard and keymap before continuing. */
+  for (i = 0; i < MAX_INIT_ATTEMPTS; i++) {
+    wl_display_roundtrip_safe(state.display);
+    if (!state.kb || !state.xkb_state) {
+      continue;
+    }
+  }
+  if (!state.kb) {
+    errx(1, "FATAL ERROR: No wl_keyboard object from compositor");
+  }
+  if (!state.xkb_state) {
+    errx(1, "FATAL ERROR: No keymap from compositor");
   }
 }
 
@@ -2505,10 +2424,6 @@ static void applayer_poll_init(void) {
 /**********/
 /**********/
 
-/*
- * KLOAK_FUZZING excludes main() so the dist-ai kloakwl fuzz/CBMC harnesses can
- * #include this file to reach the static functions without a duplicate main.
- */
 #ifndef KLOAK_FUZZING
 int main(int argc, char **argv) {
   int poll_ret = 0;
@@ -2517,18 +2432,15 @@ int main(int argc, char **argv) {
   (void) argv;
 
   if (getuid() != 0) {
-    fprintf(stderr, "FATAL ERROR: Must be run as root!\n");
-    exit(1);
+    errx(1, "FATAL ERROR: Must be run as root");
   }
 
   /* Make sure that locales don't try to ruin our day */
   if (setenv("LC_ALL", "C", 1) == -1) {
-    fprintf(stderr, "FATAL ERROR: Could not set LC_ALL=C!\n");
-    exit(1);
+    err(1, "FATAL ERROR: Could not set LC_ALL=C");
   }
 
   TAILQ_INIT(&evq_head);
-
   init_fd_urandom();
   applayer_config_init();
   applayer_wlsock_init();
@@ -2546,7 +2458,10 @@ int main(int argc, char **argv) {
   send_pointer_space_data();
 
   while (true) {
-    while (wl_display_prepare_read(state.display) != 0) {
+    while (wl_display_prepare_read(state.display) == -1) {
+      if (errno != EAGAIN) {
+        err(1, "FATAL ERROR: Could not prepare to read from Wayland compositor");
+      }
       wl_display_dispatch_pending_safe(state.display);
     }
     wl_display_flush_safe(state.display);
@@ -2559,20 +2474,20 @@ int main(int argc, char **argv) {
       }
     }
     if (ev_fds[0].revents & POLLHUP) {
-      fprintf(stderr, "INFO: Peer disconnected, exiting.\n");
-      exit(0);
+      errx(0, "INFO: Peer disconnected, exiting");
     }
     ev_fds[0].revents = 0;
 
     release_scheduled_input_events();
 
-    for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
-      if (!state.layers[i]) {
-        continue;
-      }
-      if (state.layers[i]->frame_pending) {
-        assert(should_draw_cursor);
-        draw_frame(state.layers[i]);
+    if (should_draw_cursor) {
+      for (ssize_t i = 0; i < MAX_SCREEN_COUNT; i++) {
+        if (!state.layers[i]) {
+          continue;
+        }
+        if (state.layers[i]->frame_pending) {
+          draw_frame(state.layers[i]);
+        }
       }
     }
     wl_display_flush_safe(state.display);
@@ -2581,17 +2496,12 @@ int main(int argc, char **argv) {
       poll_ret = poll(ev_fds, POLL_FD_COUNT, calc_poll_timeout());
     } while (poll_ret == -1 && errno == EINTR);
     if (poll_ret == -1) {
-      fprintf(stderr, "FATAL ERROR: 'poll' errored out: %s\n",
-        strerror(errno));
-      exit(1);
+      err(1, "FATAL ERROR: 'poll' errored out");
     }
 
     if (ev_fds[1].revents & POLLIN) {
       if (wl_display_read_events(state.display) == -1) {
-        fprintf(stderr,
-          "FATAL ERROR: Could not read events from Wayland server: %s\n",
-          strerror(errno));
-        exit(1);
+        err(1, "FATAL ERROR: Could not read events from Wayland server");
       }
       wl_display_dispatch_pending_safe(state.display);
     } else {
