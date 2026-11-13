@@ -410,7 +410,15 @@ static ssize_t write_all(int fd, const void *buf, size_t count) {
 }
 
 static void fill_with_rand_alphabetic(char *buf, ssize_t len) {
-  char randchar = 0;
+  /*
+   * signed char, explicitly: char's signedness is implementation-defined
+   * (signed on x86, unsigned on arm64). The modulo-bias normalization below is
+   * written for the signed [-128, 127] domain -- read_random's byte read as
+   * signed, abs() folding the negative half, and the SCHAR_MIN/SCHAR_MAX
+   * bounds. A plain char miscompiles on arm64: abs() on the unsigned value is a
+   * no-op (-Werror=absolute-value) and the bias math would use 255 not 127.
+   */
+  signed char randchar = 0;
 
   assert(len >= 0);
   assert(buf != NULL);
@@ -431,7 +439,7 @@ static void fill_with_rand_alphabetic(char *buf, ssize_t len) {
      *   number of lower values that will suffer modulo bias, then subtract
      *   that from 128 to get the number of values randchar can have that will
      *   not cause modulo bias.
-     * - To avoid having to work with values larger than CHAR_MAX, we can get
+     * - To avoid having to work with values larger than SCHAR_MAX, we can get
      *   away with using 127 instead of 128 in these calculations. The modulo
      *   will be one smaller than it would be otherwise, but so will the number
      *   it is being subtracted from. If our range of values and range of
@@ -444,13 +452,13 @@ static void fill_with_rand_alphabetic(char *buf, ssize_t len) {
      *   we discard it. Otherwise, we use it.
      */
     do {
-      read_random(&randchar, 1);
-      if (randchar == CHAR_MIN) {
+      read_random((char *)(&randchar), 1);
+      if (randchar == SCHAR_MIN) {
         randchar = 0;
       } else {
-        randchar = (char)(abs(randchar));
+        randchar = (signed char)(abs(randchar));
       }
-    } while (randchar >= (CHAR_MAX - (CHAR_MAX % (ALPHABET_LEN * 2))));
+    } while (randchar >= (SCHAR_MAX - (SCHAR_MAX % (ALPHABET_LEN * 2))));
 
     randchar %= (ALPHABET_LEN * 2);
     if (randchar < ALPHABET_LEN) {
@@ -458,7 +466,13 @@ static void fill_with_rand_alphabetic(char *buf, ssize_t len) {
     } else {
       randchar += (ASCII_LOWERCASE_START - ALPHABET_LEN);
     }
-    buf[i] = randchar;
+    /*
+     * randchar is now a printable ASCII letter (ASCII_UPPERCASE_START ..
+     * lowercase end), so the value fits plain char on either signedness; the
+     * cast makes the signed-char -> char narrowing explicit (clean under
+     * -Wsign-conversion when char is unsigned, i.e. arm64).
+     */
+    buf[i] = (char)(randchar);
   }
 }
 
