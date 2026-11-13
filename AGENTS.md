@@ -142,3 +142,21 @@ not re-litigated.
 - Move-over-scroll packet coalescing relocates the scroll deliberately: under a
   high-resolution scroll flood mixed with pointer movement, preserving jitter
   outweighs the rare scroll misplacement.
+- Signed-overflow aborts under `-ftrapv` from hostile compositor-controlled
+  magnitudes (Whonix/kloak#43): WONTFIX. A hostile compositor can crash kloak
+  many ways (it could just disconnect it) and already sees all input, so a
+  trapped crash is not a security issue. `traverse_line`'s `abs(INT32_MIN)` is
+  guarded by an assert (defined abort, CBMC-covered); the rest (`err_val * 2`,
+  `recalc_global_space` span, released-movement subtract, scroll tick multiply)
+  stay raw int32 and rely on `-ftrapv` for a safe crash. Do not add clamps.
+- Absolute-pointer coordinate vs output-geometry resize race over the unversioned
+  parent<->child pipes (Whonix/kloak#41): WONTFIX. On a VM with mouse integration
+  this is intended; on a physical touchscreen it is a rare, minor mispositioning
+  not worth the VM-detection + rescaling cost. Do not add a geometry generation tag.
+- Closing the shm fd right after `wl_shm_create_pool` (Whonix/kloak#44): safe.
+  `wl_proxy_marshal_flags` `dup2()`s the fd for libwayland's own use, so our close
+  does not race the compositor. TODO removed; do not re-add it.
+- One-pixel cursor shift when a move goes diagonally off-screen (Whonix/kloak#45):
+  not a leak, out of scope. Screen geometry is already public to every client on
+  the compositor. TODO removed; do not re-raise or rewrite the ambiguous-direction
+  resolution.
