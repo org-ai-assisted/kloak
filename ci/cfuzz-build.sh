@@ -110,7 +110,9 @@ scripts/src-transform src/kloak.h.in /usr/bin
 ##
 ## pkg-config provides cflags/libs for libinput, libevdev,
 ## wayland-client, xkbcommon - the same set kloak's main Makefile
-## consumes.
+## consumes. A kloakwl.c-based harness additionally references libcap
+## (drop_capabilities), so -lcap is linked below; it is harmless to the
+## kloak.c harnesses that do not use it.
 
 PKG_LIBS=(libinput libevdev wayland-client xkbcommon)
 PKG_CFLAGS_VALUE="$(pkg-config --cflags "${PKG_LIBS[@]}")"
@@ -128,7 +130,7 @@ for harness in fuzz/fuzz_*.c; do
     "${PROTO_SRC[@]}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
-    -lm -lrt \
+    -lm -lrt -lcap \
     ${PKG_LIBS_VALUE}
 
   printf '%s\n' "compiled ${name} -> ${OUT}/${name}"
