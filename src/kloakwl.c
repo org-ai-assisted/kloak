@@ -680,6 +680,10 @@ static void kb_handle_keymap(__attribute__((unused)) void *data,
       if (munmap(kb_map_shm, size) == -1) {
         assert(false);
       }
+      /* Close the compositor-provided fd; every other path here closes it, and
+       * a repeated identical keymap would otherwise leak one fd per event until
+       * shm_open/allocate_shm fails fatally. */
+      safe_close(fd, "Wayland keymap data");
       return;
     } else {
       assert(state.old_kb_map_shm_size >= 0);
@@ -1737,7 +1741,16 @@ static struct input_packet *update_virtual_cursor(void) {
         struct coord sane_location = screen_local_coord_to_abs_coord(0, 0, i,
           &sane_location_valid);
 
-        assert(sane_location_valid);
+        if (!sane_location_valid) {
+          /*
+           * This output has no usable geometry yet: labwc emits wl_output::done
+           * before the xdg-output logical size, and display_sync_maybe records a
+           * 0x0 geometry until the size arrives. Skip it -- as recalc_global_space
+           * and abs_coord_to_screen_local_coord already skip 0x0 -- and try the
+           * next screen instead of aborting.
+           */
+          continue;
+        }
         assert(sane_location.x <= INT32_MAX && sane_location.x >= INT32_MIN);
         assert(sane_location.y <= INT32_MAX && sane_location.y >= INT32_MIN);
         prev_cursor_x = sane_location.x;
@@ -2090,8 +2103,28 @@ static void applayer_config_init(void) {
     msg_obj = get_msg_from_peer(&msg_type, NULL);
 
     switch (msg_type) {
-    case 0:
+    case 0: {
+      /*
+       * No complete message yet. BLOCK on the config fd rather than busy-loop:
+       * read_peer_data_to_ring_buffer returns early on FIONREAD==0 without ever
+       * read()ing, so it never observes EOF by itself, and a parent that dies
+       * before sending config would spin kloakwl at 100% CPU while it still
+       * holds capabilities. Exit on hangup once no buffered data remains.
+       */
+      struct pollfd cfg_pfd = { .fd = recv_read_fd, .events = POLLIN,
+        .revents = 0 };
+      int cfg_pret = 0;
+      do {
+        cfg_pret = poll(&cfg_pfd, 1, -1);
+      } while (cfg_pret == -1 && errno == EINTR);
+      if (cfg_pret == -1) {
+        err(1, "FATAL ERROR: Could not poll peer config fd");
+      }
+      if ((cfg_pfd.revents & POLLHUP) && !(cfg_pfd.revents & POLLIN)) {
+        errx(0, "INFO: Peer disconnected before config, exiting");
+      }
       continue;
+    }
 
     case PTC_PACKET_MAX_DELAY_CONFIG:
       if (max_delay_received) {
