@@ -37,26 +37,57 @@ ExecStart=/usr/bin/kloak
 Restart=always
 RestartSec=2s
 
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG CAP_SYS_PTRACE
+## dac_override: traverse the user-owned /run/user/<uid> + open /dev/input/event*.
+## setuid/setgid: kloakwl drops to an unprivileged uid before it unshares. No
+## sys_admin/sys_chroot: kloakwl's mount/pivot_root run inside its own new user
+## namespace, which grants a full capability set there. AppArmor usr.bin.kloak
+## still confines kloak itself to dac_override.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
 
 ProtectSystem=strict
-#ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ## hardened kernels without CONFIG_USER_NS_UNPRIVILEGED=Y
 ## need to:
-## * disable or comment out the 3 'Private' namespaces below
+## * disable or comment out the two 'Private' namespaces below
 ## $ systemctl edit --full kloak
 PrivateTmp=true
-#PrivateUsers=true
 PrivateNetwork=true
+## The privileged component of kloak cannot bypass MemoryDenyWriteExecute=true
+## as it does not have executable mmap privileges for any files outside of
+## /usr/lib with our AppArmor profile, and cannot use memfd_create. The
+## unprivileged component of kloak is in a similar situation, but it also can't
+## see any filesystems that aren't mounted noexec, which is even better.
 MemoryDenyWriteExecute=true
-NoNewPrivileges=true
+## kloakwl runs under a SEPARATE, broader AppArmor profile (Px) to build its own
+## sandbox (userns/mount/pivot_root); no_new_privs forbids an exec transition to a
+## non-subset profile, so it is off here. kloak and kloakwl each set no_new_privs
+## themselves (prctl) once past the transition. The SystemCallFilter below still
+## installs (the root executor holds CAP_SYS_ADMIN) and is inherited by kloakwl.
+NoNewPrivileges=false
 RestrictRealtime=true
-RestrictNamespaces=true
+## kloak fork+execve's a sandboxed kloakwl Wayland adapter that builds its own
+## nested sandbox (user+mnt+net+ipc+pid+uts+cgroup+time namespaces, then pivot_root,
+## cap drop, uid drop). kloakwl inherits this unit's seccomp filter and namespace
+## policy, so both must permit kloakwl's sandbox setup, not only kloak's proxy work.
+RestrictNamespaces=user pid net ipc uts cgroup mnt time
 SystemCallArchitectures=native
-SystemCallFilter=brk open poll close ioctl mmap munmap read pread64 getdents64 socket connect getsockopt epoll_create1 epoll_ctl rt_sigprocmask epoll_wait inotify_init1 access openat fstat prctl sendmsg recvmsg newfstatat unlink ftruncate fcntl timerfd_create statx readlinkat faccessat2 fstatfs inotify_add_watch timerfd_settime madvise sigaltstack rt_sigaction
+## Syscall GROUPS, not a hand-list: arch-neutral (systemd expands each group to the
+## syscalls that exist on the running arch), so no x86-only name can be silently
+## omitted on arm64 -- the root fix for the arm64 SIGSYS class. @system-service is
+## the service baseline; @sandbox @mount @privileged @setuid @resources cover
+## kloakwl's unshare, mount/pivot_root, capset, uid/gid drop and rlimit calls.
+SystemCallFilter=@system-service @sandbox @mount @privileged @setuid @resources
+## Second line subtracts memfd_create from the allow-set so MemoryDenyWriteExecute=true
+## above is effective; kloakwl avoids memfd_create in code too.
+SystemCallFilter=~memfd_create
+
+## The following settings do not work:
+#ProtectHome=true ## Prevents Wayland socket access
+#PrivateUsers=true ## Prevents Wayland socket access
+#RestrictNamespaces=true ## Breaks self-sandboxing
+#NoNewPrivileges=true ## Prevents launching the Wayland adapter
 
 [Install]
 WantedBy=graphical.target

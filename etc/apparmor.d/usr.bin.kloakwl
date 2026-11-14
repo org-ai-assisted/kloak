@@ -1,0 +1,66 @@
+# Last Modified: Thu Nov 5 19:26:10 2026
+include <tunables/global>
+
+## Copyright (C) 2026 - 2026 ENCRYPTED SUPPORT LLC <adrelanos@whonix.org>
+## See the file COPYING for copying conditions.
+
+## attach_disconnected: after pivot_root + MNT_DETACH of the old root, fds/paths
+## opened pre-pivot are disconnected; without this AppArmor denies them outright
+## instead of mediating against the rules below.
+/usr/bin/kloakwl flags=(attach_disconnected) {
+  include <local/usr.bin.kloakwl>
+
+  network unix stream,
+
+  signal receive set=cont peer=unconfined,
+  signal receive set=exists peer=unconfined,
+  signal receive set=kill peer=unconfined,
+  signal receive set=term peer=unconfined,
+
+  capability dac_override,
+  deny capability dac_read_search,
+  capability setuid,
+  capability setgid,
+  ## This gets denied even in the sandbox if not permitted.
+  capability sys_admin,
+
+  userns create,
+
+  mount options=rprivate /,
+  mount fstype=tmpfs options=(rw,nosuid,nodev,noexec,nosymfollow) newroot -> /tmp/,
+  mount options=bind /usr/share/X11/xkb/ -> /tmp/usr/share/X11/xkb/,
+  remount options=(ro, bind) /tmp/usr/share/X11/xkb/,
+
+  pivot_root oldroot=/tmp/ /tmp/,
+
+  ## /proc is unmounted early in sandbox setup; the old root ("/") after pivot.
+  umount /proc,
+  umount /,
+
+  /etc/ld.so.cache r,
+  /etc/ld.so.preload r,
+  /usr/bin/kloakwl mr,
+  /{,usr/}lib{,32,64}/** mr,
+
+  @{PROC}/@{pid}/{uid_map,gid_map,setgroups} rw,
+  /tmp/ rw,
+  /tmp/** rw,
+  /etc/nsswitch.conf r,
+  /etc/passwd r,
+  /etc/group r,
+
+  /dev/urandom r,
+  ## Wayland socket, connected before pivot_root. Needs w as well as r: on kernels
+  ## with AppArmor af_unix mediation (6.17+), connect() to a pathname socket is a
+  ## write-side file check.
+  /run/user/*/wayland-* rw,
+
+  ## XKB data is bind-mounted into the sandbox and, after pivot_root, resolves at
+  ## this path; libxkbcommon reads it when the compositor keymap uses includes.
+  /usr/share/X11/xkb/ r,
+  /usr/share/X11/xkb/** r,
+
+  ## POSIX shm: kloakwl uses /dev/shm instead of memfd_create so
+  ## MemoryDenyWriteExecute=true is effective.
+  /dev/shm/* rw,
+}

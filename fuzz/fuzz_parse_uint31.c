@@ -4,15 +4,15 @@
  *
  * AI-Assisted
  *
- * libFuzzer harness for kloak's parse_uint31_arg() string-to-int31
- * parser. parse_uint31_arg() is called from parse_cli_args() to
- * handle --max-delay and --startup-delay; an out-of-spec value
- * would land in security-relevant timing logic, so it is worth a
- * targeted fuzz pass.
+ * libFuzzer harness for kloak's parse_uint_arg() string-to-uint
+ * parser at its INT32_MAX cap. parse_uint_arg() is called from
+ * parse_cli_args() to handle --max-delay and --startup-delay; an
+ * out-of-spec value would land in security-relevant timing logic,
+ * so it is worth a targeted fuzz pass.
  *
  * The parsers in kloak.c were specifically authored to return
- * false on bad input rather than exit() (see the docstring at
- * kloak.c:892), so they are directly fuzz-target safe.
+ * false on bad input rather than exit(), so they are directly
+ * fuzz-target safe.
  *
  * Pulling kloak.c into the harness via #include keeps the
  * file-scope `static` qualifier on the target intact (no
@@ -32,10 +32,10 @@
 #include <string.h>
 
 /*
- * Bases parse_uint31_arg supports in practice are 10 (CLI integer
- * args) and 16 (cursor color is uint32 not int31, so 16 is more
- * relevant to the sibling harness, but feeding it here exercises
- * the strtoul path for negative-prefix edge cases).
+ * Bases parse_uint_arg supports in practice are 10 (CLI integer
+ * args) and 16 (cursor color uses the UINT32_MAX cap in the sibling
+ * harness, but feeding 16 here too exercises the strtoul path for
+ * negative-prefix edge cases).
  */
 static const int kBases[] = {10, 16, 8, 2};
 
@@ -53,8 +53,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   memcpy(buf, data + 1, slen);
   buf[slen] = '\0';
 
-  int32_t out = 0;
-  (void)parse_uint31_arg(buf, base, &out);
+  uint32_t out = 0;
+  (void)parse_uint_arg(buf, base, INT32_MAX, &out);
 
   free(buf);
   return 0;
