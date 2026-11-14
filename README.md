@@ -39,11 +39,11 @@ Install dependencies:
 
 Debian:
 
-    $ sudo apt install make libevdev2 libevdev-dev libinput10 libinput-dev libwayland-client0 libwayland-dev libudev1 libudev-dev libxkbcommon0 libxkbcommon-dev pkg-config
+    $ sudo apt install make libevdev2 libevdev-dev libinput10 libinput-dev libwayland-client0 libwayland-dev libudev1 libudev-dev libxkbcommon0 libxkbcommon-dev libcap2 libcap-dev pkg-config
 
 Fedora:
 
-    $ sudo dnf install make libevdev libevdev-devel libinput libinput-devel libwayland-client wayland-devel systemd-libs systemd-devel libxkbcommon libxkbcommon-devel pkgconf-pkg-config
+    $ sudo dnf install make libevdev libevdev-devel libinput libinput-devel libwayland-client wayland-devel systemd-libs systemd-devel libxkbcommon libxkbcommon-devel libcap libcap-devel pkgconf-pkg-config
 
 To compile `kloak`, simply run:
 
