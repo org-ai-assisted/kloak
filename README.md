@@ -49,6 +49,21 @@ To compile `kloak`, simply run:
 
     $ make all
 
+To install the compiled binaries, AppArmor profiles and man pages:
+
+    $ sudo make install
+
+`kloakwl`, the sandboxed Wayland adapter, drops to a dedicated unprivileged
+`kloakwl` user and group and aborts during sandbox setup if they are absent. A
+package install creates them from the shipped `debian/kloak.sysusers`
+definition; for a source install, create them with:
+
+    $ sudo systemd-sysusers debian/kloak.sysusers
+
+`kloak` launches `kloakwl` from the install `bindir` (`/usr/bin` by default), so
+`sudo make install` -- or a matching `bindir=` -- must run before starting
+`kloak`.
+
 ### As a service
 
 How to install `kloak` using apt-get
