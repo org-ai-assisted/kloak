@@ -317,15 +317,25 @@ static int32_t sleep_ms(int64_t ms) {
 
 static int li_open_restricted(const char *path, int flags,
   __attribute__((unused)) void *user_data) {
-  int fd = safe_open(path, flags | O_CLOEXEC);
+  /*
+   * libinput's open_restricted contract (kloak.h.in) returns -errno on failure
+   * rather than aborting: a device can vanish between inotify IN_CREATE and
+   * attach_input_device, and a fatal safe_open here would tear kloak down and
+   * release every device grab, de-anonymizing input. Open directly and hand the
+   * error back to libinput. A FAILED GRAB stays fatal (contract line 148).
+   */
+  int fd = open(path, flags | O_CLOEXEC);
   int one = 1;
 
+  if (fd < 0) {
+    return -errno;
+  }
   if (wl_connect_success) {
     if (ioctl(fd, EVIOCGRAB, &one) < 0) {
       err(1, "FATAL ERROR: Could not grab evdev device '%s'", path);
     }
   }
-  return fd < 0 ? -errno : fd;
+  return fd;
 }
 
 static void li_close_restricted(int fd,
