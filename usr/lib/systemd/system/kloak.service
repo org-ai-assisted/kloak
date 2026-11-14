@@ -68,10 +68,10 @@ MemoryDenyWriteExecute=true
 NoNewPrivileges=false
 RestrictRealtime=true
 ## kloak fork+execve's a sandboxed kloakwl Wayland adapter that builds its own
-## nested sandbox (user+mnt+net+ipc+pid+uts+cgroup namespaces, then pivot_root,
+## nested sandbox (user+mnt+net+ipc+pid+uts+cgroup+time namespaces, then pivot_root,
 ## cap drop, uid drop). kloakwl inherits this unit's seccomp filter and namespace
 ## policy, so both must permit kloakwl's sandbox setup, not only kloak's proxy work.
-RestrictNamespaces=user pid net ipc uts cgroup mnt
+RestrictNamespaces=user pid net ipc uts cgroup mnt time
 SystemCallArchitectures=native
 ## Syscall GROUPS, not a hand-list: arch-neutral (systemd expands each group to the
 ## syscalls that exist on the running arch), so no x86-only name can be silently
