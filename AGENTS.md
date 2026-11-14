@@ -109,8 +109,15 @@ live in the AI-maintained dist-ai repo, not here
   callbacks and I/O wrappers, the unbounded cursor-glide loop
   (`make_virtual_cursor_pos_sane` / `update_virtual_cursor`), and
   `recalc_global_space` (its O(n^2) screen-connectivity scan over symbolic
-  geometry does not converge; unit-covered, and its per-pair
-  `check_screen_touch` component is proven).
+  geometry does not converge; unit-covered + fuzzed, and its per-pair
+  `check_screen_touch` component is proven). Also `calc_next_led_state` (uint8
+  lock-state counters, no overflow surface) and `calc_poll_timeout` (an int64
+  clamp) -- negligible UB surface, covered by unit tests instead of CBMC.
+- Now proven, do NOT re-flag as missing: `fill_with_rand_alphabetic`'s [A-Za-z]
+  invariant and `parse_inotify_events`' UB-freedom + buf_pos bound. The geometry
+  proofs span negative monitor origins (a left/above-primary output), not only
+  the non-negative quadrant. `traverse_line` stays non-negative on purpose: its
+  `err_val * 2` over a negative-to-positive span is the settled -ftrapv WONTFIX.
 
 ## Settled -- do not re-litigate
 
