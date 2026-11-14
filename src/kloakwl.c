@@ -634,6 +634,16 @@ static void seat_handle_capabilities(__attribute__((unused)) void *data,
 
   state.seat_caps = capabilities;
   if (capabilities & WL_SEAT_CAPABILITY_KEYBOARD) {
+    if (state.kb != NULL) {
+      /*
+       * Release the keyboard from a previous capabilities announcement before
+       * acquiring a new one. wlroots re-emits the full capability mask on any
+       * seat device change, so without this a re-announce leaks the prior
+       * wl_keyboard proxy and its listener.
+       */
+      wl_keyboard_release(state.kb);
+      state.kb = NULL;
+    }
     state.kb = wl_seat_get_keyboard(seat);
     if (!state.kb) {
       err(1, "FATAL ERROR: Could not get wl_keyboard");
@@ -2260,9 +2270,9 @@ static void applayer_sandbox_init(void) {
    * by root.
    */
   change_dumpable(true);
-  write_to_file("/proc/self/uid_map", "0 %d 1\n", pw_data->pw_uid);
+  write_to_file("/proc/self/uid_map", "0 %u 1\n", pw_data->pw_uid);
   write_to_file("/proc/self/setgroups", "deny\n");
-  write_to_file("/proc/self/gid_map", "0 %d 1\n", gr_data->gr_gid);
+  write_to_file("/proc/self/gid_map", "0 %u 1\n", gr_data->gr_gid);
   change_dumpable(false);
 
   /*
