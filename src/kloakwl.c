@@ -2219,7 +2219,6 @@ static void applayer_sandbox_init(void) {
     }
     err(1, "FATAL ERROR: Could not get user information for '" SANDBOX_DEDICATED_USER "'");
   }
-  assert(pw_data->pw_uid >= 0);
   if (pw_data->pw_uid == 0) {
     errx(1, "FATAL ERROR: '" SANDBOX_DEDICATED_USER "' UID is 0 (root), refusing to continue");
   }
@@ -2231,7 +2230,6 @@ static void applayer_sandbox_init(void) {
     }
     err(1, "FATAL ERROR: Could not get group information for '" SANDBOX_DEDICATED_USER "'");
   }
-  assert(gr_data->gr_gid >= 0);
   if (gr_data->gr_gid == 0) {
     errx(1, "FATAL ERROR: '" SANDBOX_DEDICATED_USER "' GID is 0 (root), refusing to continue");
   }
