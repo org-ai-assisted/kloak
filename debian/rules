@@ -20,5 +20,10 @@ override_dh_installchangelogs:
 
 override_dh_install:
 	dh_apparmor --profile-name=usr.bin.kloak
+	dh_apparmor --profile-name=usr.bin.kloakwl
 	dh_apparmor --profile-name=usr.libexec.kloak.find_wl_compositor
 	dh_install
+	## dh_installsysusers joins the default sequence only at compat 14; this
+	## package is compat 13, so call it here or debian/kloak.sysusers is never
+	## installed and the kloakwl user kloakwl drops to is never created.
+	dh_installsysusers
