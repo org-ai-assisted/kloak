@@ -348,7 +348,6 @@ static bool device_supports_sensitive_events(int fd) {
   struct libevdev *dev = NULL;
   int ret = 0;
   uint16_t i = 0;
-  bool sensitive = false;
 
   ret = libevdev_new_from_fd(fd, &dev);
   if (ret < 0) {
@@ -360,6 +359,7 @@ static bool device_supports_sensitive_events(int fd) {
     warn("WARNING: Could not scan device for sensitive events");
     return true;
   }
+  assert(dev != NULL);
 
   /* EV_SYN is considered always safe. */
 
@@ -367,34 +367,29 @@ static bool device_supports_sensitive_events(int fd) {
     for (i = 0; i < KEY_CNT; i++) {
       if (libevdev_has_event_code(dev, EV_KEY, i)
         && !event_is_whitelisted(EV_KEY, i)) {
-        sensitive = true;
-        goto device_supports_sensitive_events_out;
+        goto true_exit;
       }
     }
   }
 
   if (libevdev_has_event_type(dev, EV_REL)) {
-    sensitive = true;
-    goto device_supports_sensitive_events_out;
+    goto true_exit;
   }
 
   if (libevdev_has_event_type(dev, EV_ABS)) {
-    sensitive = true;
-    goto device_supports_sensitive_events_out;
+    goto true_exit;
   }
 
   if (libevdev_has_event_type(dev, EV_MSC)) {
     /* TODO: Are there some EV_MSC events we'd like to allow through? */
-    sensitive = true;
-    goto device_supports_sensitive_events_out;
+    goto true_exit;
   }
 
   if (libevdev_has_event_type(dev, EV_SW)) {
     for (i = 0; i < SW_CNT; i++) {
       if (libevdev_has_event_code(dev, EV_SW, i)
         && !event_is_whitelisted(EV_SW, i)) {
-        sensitive = true;
-        goto device_supports_sensitive_events_out;
+        goto true_exit;
       }
     }
   }
@@ -410,14 +405,16 @@ static bool device_supports_sensitive_events(int fd) {
   /* Any hitherto unknown event types are considered sensitive. */
   for (i = EV_FF_STATUS; i < EV_CNT; i++) {
     if (libevdev_has_event_type(dev, i)) {
-      sensitive = true;
-      goto device_supports_sensitive_events_out;
+      goto true_exit;
     }
   }
 
-device_supports_sensitive_events_out:
   libevdev_free(dev);
-  return sensitive;
+  return false;
+
+true_exit:
+  libevdev_free(dev);
+  return true;
 }
 
 /*******************************/
