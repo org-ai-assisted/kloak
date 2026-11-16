@@ -563,7 +563,18 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
       *buf_pos_ptr = -1;
       return NULL;
     }
+    /*
+     * Guards 32-bit wraparound (small SSIZE_MAX); on 64-bit uint32 ie->len is
+     * always below SSIZE_MAX, which clang alone flags as tautological.
+     */
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wtautological-constant-out-of-range-compare"
+#endif
     assert(ie->len < SSIZE_MAX - sizeof(struct inotify_event));
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     struct_len = ((ssize_t)(sizeof(struct inotify_event))
       + (ssize_t)(ie->len));
     if (struct_len > rem_len) {

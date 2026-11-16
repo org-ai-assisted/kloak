@@ -323,7 +323,10 @@ static void move_fd(int orig_fd, int new_fd) {
 
   /* The caller is expected to manage new_fd. */
 #pragma GCC diagnostic push
+/* -Wanalyzer-fd-leak is a GCC-only group; clang rejects it under -Werror. */
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wanalyzer-fd-leak"
+#endif
   if (dup2(orig_fd, new_fd) == -1) {
 #pragma GCC diagnostic pop
     err(1, "FATAL ERROR: Could not assign fd during move");
@@ -337,7 +340,10 @@ static void move_fd(int orig_fd, int new_fd) {
  * definitions in kloakwl.h for more info.
  */
 #pragma GCC diagnostic push
+/* -Wanalyzer-fd-leak is a GCC-only group; clang rejects it under -Werror. */
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic ignored "-Wanalyzer-fd-leak"
+#endif
 static void init_fd_urandom(void) {
   int randfd = safe_open("/dev/urandom", O_RDONLY | O_CLOEXEC);
   move_fd(randfd, FD_URANDOM);

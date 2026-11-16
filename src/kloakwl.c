@@ -1110,7 +1110,11 @@ static int open_wl_sock(void) {
      * dynamically allocated.
      */
 #pragma GCC diagnostic push
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
+#else
 #pragma GCC diagnostic ignored "-Wdiscarded-qualifiers"
+#endif
     free(wl_sock_path);
 #pragma GCC diagnostic pop
   }
