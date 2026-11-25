@@ -88,6 +88,18 @@ for proto_pair in \
   PROTO_SRC+=("${base}.c")
 done
 
+## --- Generated kloak.c / kloak.h ------------------------------------
+##
+## kloak.c and kloak.h are rendered from their .in templates by 'make'
+## and are no longer committed, so a fresh checkout must render both
+## before compiling a harness that #include's src/kloak.c. Use the
+## build's own scripts/src-transform (the real generator) rather than
+## re-expressing its substitutions here. The kloak.h kloakwl path is
+## irrelevant to the fuzzers (they never exec kloakwl); any valid bindir
+## works.
+scripts/src-transform src/kloak.c.in
+scripts/src-transform src/kloak.h.in /usr/bin
+
 ## --- Harness compile loop -------------------------------------------
 ##
 ## Each harness #include's src/kloak.c with -DKLOAK_FUZZING so
@@ -98,7 +110,9 @@ done
 ##
 ## pkg-config provides cflags/libs for libinput, libevdev,
 ## wayland-client, xkbcommon - the same set kloak's main Makefile
-## consumes.
+## consumes. A kloakwl.c-based harness additionally references libcap
+## (drop_capabilities), so -lcap is linked below; it is harmless to the
+## kloak.c harnesses that do not use it.
 
 PKG_LIBS=(libinput libevdev wayland-client xkbcommon)
 PKG_CFLAGS_VALUE="$(pkg-config --cflags "${PKG_LIBS[@]}")"
@@ -116,7 +130,7 @@ for harness in fuzz/fuzz_*.c; do
     "${PROTO_SRC[@]}" \
     -o "${OUT}/${name}" \
     ${LIB_FUZZING_ENGINE} \
-    -lm -lrt \
+    -lm -lrt -lcap \
     ${PKG_LIBS_VALUE}
 
   printf '%s\n' "compiled ${name} -> ${OUT}/${name}"

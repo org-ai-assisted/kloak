@@ -1,4 +1,8 @@
 /kloak
+/kloakwl
+## generated from the .in templates by 'make' (src-transform)
+/src/kloak.c
+/src/kloak.h
 /out/
 eventcap
 cmake-build-debug/

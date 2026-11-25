@@ -137,7 +137,7 @@ clean :
 	rm -f kloak kloakwl
 	rm -f src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.h src/wlr-layer-shell.c src/wlr-virtual-pointer.h src/wlr-virtual-pointer.c src/virtual-keyboard.h src/virtual-keyboard.c src/kloak.h src/kloak.c
 
-install : all etc/apparmor.d/usr.bin.kloak $(MANPAGES)
+install : all etc/apparmor.d/usr.bin.kloak etc/apparmor.d/usr.bin.kloakwl $(MANPAGES)
 	$(INSTALL) -d -m 755 $(addprefix $(DESTDIR), $(bindir) $(mandir)/man8 $(apparmor_dir))
 	$(INSTALL) -m 755 kloak $(DESTDIR)$(bindir)
 	$(INSTALL) -m 755 kloakwl $(DESTDIR)$(bindir)

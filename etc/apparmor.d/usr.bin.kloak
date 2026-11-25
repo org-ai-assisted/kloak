@@ -15,6 +15,8 @@ include <tunables/global>
   /etc/ld.so.cache r,
   /etc/ld.so.preload r,
   /usr/bin/kloak mr,
+  ## kloak fork+execve's the sandboxed Wayland adapter; confine it under its own
+  ## (broader) profile, named explicitly so the transition cannot fall back.
   /usr/bin/kloakwl rPx -> /usr/bin/kloakwl,
   /{,usr/}lib{,32,64}/** mr,
   /dev/input/ r,

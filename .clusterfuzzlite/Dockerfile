@@ -32,6 +32,7 @@ RUN apt-get update && \
       libevdev-dev \
       libwayland-dev \
       libxkbcommon-dev \
+      libcap-dev \
       libwayland-bin \
       wayland-protocols \
       pkg-config && \

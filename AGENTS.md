@@ -109,12 +109,19 @@ live in the AI-maintained dist-ai repo, not here
   callbacks and I/O wrappers, the unbounded cursor-glide loop
   (`make_virtual_cursor_pos_sane` / `update_virtual_cursor`), and
   `recalc_global_space` (its O(n^2) screen-connectivity scan over symbolic
-  geometry does not converge; unit-covered, and its per-pair
-  `check_screen_touch` component is proven).
+  geometry does not converge; unit-covered + fuzzed, and its per-pair
+  `check_screen_touch` component is proven). Also `calc_next_led_state` (uint8
+  lock-state counters, no overflow surface) and `calc_poll_timeout` (an int64
+  clamp) -- negligible UB surface, covered by unit tests instead of CBMC.
+- Now proven, do NOT re-flag as missing: `fill_with_rand_alphabetic`'s [A-Za-z]
+  invariant and `parse_inotify_events`' UB-freedom + buf_pos bound. The geometry
+  proofs span negative monitor origins (a left/above-primary output), not only
+  the non-negative quadrant. `traverse_line` stays non-negative on purpose: its
+  `err_val * 2` over a negative-to-positive span is the settled -ftrapv WONTFIX.
 
 ## Settled -- do not re-litigate
 
-Maintainer decisions from the Whonix/kloak#24 audit. A reviewer re-raising one
+Accepted maintainer decisions (Whonix/kloak audits). A reviewer re-raising one
 is a false positive; drop it. Standing: record every accepted maintainer
 decision (wontfix / by-design / out-of-scope) here when it is made, so it is
 not re-litigated.
@@ -136,3 +143,27 @@ not re-litigated.
 - `LIBINPUT_EVENT_DEVICE_REMOVED` does not synthesize key/button releases: not
   needed. libinput emits releases for held inputs when a device is removed; the
   per-device tracking-queue approach was reverted as buggy and must not return.
+- CLI options are single-use. The getopt duplicate-option guard rejects any
+  repeat; the parsers assume one call. Do not support or test passing an option
+  more than once (the repeated-`-k` uninitialised-slot concern is moot).
+- Move-over-scroll packet coalescing relocates the scroll deliberately: under a
+  high-resolution scroll flood mixed with pointer movement, preserving jitter
+  outweighs the rare scroll misplacement.
+- Signed-overflow aborts under `-ftrapv` from hostile compositor-controlled
+  magnitudes (Whonix/kloak#43): WONTFIX. A hostile compositor can crash kloak
+  many ways (it could just disconnect it) and already sees all input, so a
+  trapped crash is not a security issue. `traverse_line`'s `abs(INT32_MIN)` is
+  guarded by an assert (defined abort, CBMC-covered); the rest (`err_val * 2`,
+  `recalc_global_space` span, released-movement subtract, scroll tick multiply)
+  stay raw int32 and rely on `-ftrapv` for a safe crash. Do not add clamps.
+- Absolute-pointer coordinate vs output-geometry resize race over the unversioned
+  parent<->child pipes (Whonix/kloak#41): WONTFIX. On a VM with mouse integration
+  this is intended; on a physical touchscreen it is a rare, minor mispositioning
+  not worth the VM-detection + rescaling cost. Do not add a geometry generation tag.
+- Closing the shm fd right after `wl_shm_create_pool` (Whonix/kloak#44): safe.
+  `wl_proxy_marshal_flags` `dup2()`s the fd for libwayland's own use, so our close
+  does not race the compositor. TODO removed; do not re-add it.
+- One-pixel cursor shift when a move goes diagonally off-screen (Whonix/kloak#45):
+  not a leak, out of scope. Screen geometry is already public to every client on
+  the compositor. TODO removed; do not re-raise or rewrite the ambiguous-direction
+  resolution.
