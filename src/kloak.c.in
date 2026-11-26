@@ -423,13 +423,7 @@ true_exit:
 
 static int li_open_restricted(const char *path, int flags,
   __attribute__((unused)) void *user_data) {
-  /*
-   * libinput's open_restricted contract (kloak.h.in) returns -errno on failure
-   * rather than aborting: a device can vanish between inotify IN_CREATE and
-   * attach_input_device, and a fatal safe_open here would tear kloak down and
-   * release every device grab, de-anonymizing input. Open directly and hand the
-   * error back to libinput. A FAILED GRAB stays fatal (contract line 148).
-   */
+  /* Not using safe_open intentionally, libinput can handle a failed open. */
   int fd = open(path, flags | O_CLOEXEC);
   int one = 1;
 
@@ -563,10 +557,6 @@ static char *parse_inotify_events(char *inotify_buf, ssize_t buf_len,
       *buf_pos_ptr = -1;
       return NULL;
     }
-    /*
-     * Guards 32-bit wraparound (small SSIZE_MAX); on 64-bit uint32 ie->len is
-     * always below SSIZE_MAX, which clang alone flags as tautological.
-     */
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wtautological-constant-out-of-range-compare"
