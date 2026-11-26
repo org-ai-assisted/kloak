@@ -902,16 +902,6 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
       }
     }
   }
-  if (i == MAX_SCREEN_COUNT) {
-    /*
-     * No layer matched this surface, so there is nothing to configure. Ack the
-     * event and skip. This also keeps the pending_output_geometries[i] read
-     * below in bounds: without a match, i == MAX_SCREEN_COUNT here, one past
-     * the end (a real out-of-bounds read once asserts are compiled out).
-     */
-    zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
-    return;
-  }
   assert(layer != NULL);
 
   /*
@@ -923,6 +913,14 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
    * virtual cursor just won't be drawn when the mouse moves into an area we
    * didn't allocate layer space for.
    */
+  /*
+   * A layer matched in the loop above, so i is within [0, MAX_SCREEN_COUNT).
+   * Assert the bound before indexing (AGENTS.md: assert array bounds before
+   * indexing). NDEBUG is never defined, so a no-match would already have
+   * aborted at the assert(layer != NULL) above; this index is never reached
+   * out of bounds.
+   */
+  assert(i >= 0 && i < MAX_SCREEN_COUNT);
   geometry = state.pending_output_geometries[i];
   assert(geometry != NULL);
   if (width == 0) {
