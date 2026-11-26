@@ -1,6 +1,6 @@
 .\" generated with Ronn-NG/v0.10.1
 .\" http://github.com/apjanke/ronn-ng/tree/0.10.1
-.TH "KLOAK" "8" "January 2020" "kloak" "kloak Manual"
+.TH "KLOAK" "8" "September 2026" "kloak" "kloak Manual"
 .SH "NAME"
 \fBkloak\fR \- anti keystroke deanonymization tool
 .SH "SYNOPSIS"
@@ -45,7 +45,7 @@ Because \fBkloak\fR grabs all input devices for itself and only sends those even
 .P
 \fBkloak\fR interacts directly with all input devices, thus input device settings that would usually be configured by the Wayland compositor need to be configured in \fBkloak\fR instead\. Currently the only special feature \fBkloak\fR supports is reversed (a\.k\.a\. "natural") scrolling, which can be enabled by specifying \fB\-\-natural\-scrolling=true\fR\.
 .P
-Typically, if \fBkloak\fR cannot connect to a Wayland compositor, it will remain running, but will do nothing other than swallowing all keyboard and mouse input\. It will wait for the user to press an escape key combo before exiting\. If you would like \fBkloak\fR to exit immediately if it cannot connect to Wayland, set the \fBKLOAK_EXIT_ON_WL_CONNECT_FAILURE\fR environment variable to \fB1\fR\.
+Typically, if \fBkloak\fR cannot connect to a Wayland compositor, it will remain running, but will do nothing other than swallowing all keyboard and mouse input\. It will wait for the user to press an escape key combo before exiting\. If you would like \fBkloak\fR to exit immediately if it cannot connect to Wayland, set the \fBKLOAK_EXIT_ON_WL_CONNECT_FAILURE\fR environment variable to \fBtrue\fR\.
 .SH "WWW"
 https://github\.com/Whonix/kloak
 .SH "CREDITS"
