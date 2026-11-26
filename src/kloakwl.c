@@ -902,6 +902,16 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
       }
     }
   }
+  if (i == MAX_SCREEN_COUNT) {
+    /*
+     * No layer matched this surface, so there is nothing to configure. Ack the
+     * event and skip. This also keeps the pending_output_geometries[i] read
+     * below in bounds: without a match, i == MAX_SCREEN_COUNT here, one past
+     * the end (a real out-of-bounds read once asserts are compiled out).
+     */
+    zwlr_layer_surface_v1_ack_configure(layer_surface, serial);
+    return;
+  }
   assert(layer != NULL);
 
   /*
