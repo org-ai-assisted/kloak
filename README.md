@@ -28,28 +28,32 @@ Technical details:
 
 ## Installation
 
-There are two ways to run kloak:
+There are two ways to install kloak:
 
-  1. As an application
-  2. As a Linux service
+  1. Manually
+  2. From the Whonix repos
 
-### As an application
+### Manually
 
 Install dependencies:
 
 Debian:
 
-    $ sudo apt install make libevdev2 libevdev-dev libinput10 libinput-dev libwayland-client0 libwayland-dev libudev1 libudev-dev libxkbcommon0 libxkbcommon-dev pkg-config
+    $ sudo apt install make libevdev2 libevdev-dev libinput10 libinput-dev libwayland-client0 libwayland-dev libudev1 libudev-dev libxkbcommon0 libxkbcommon-dev libcap2 libcap-dev pkg-config
 
 Fedora:
 
-Unknown currently. Refer to Debian dependency list and install equivalent packages on Fedora.
+    $ sudo dnf install make libevdev libevdev-devel libinput libinput-devel libwayland-client wayland-devel systemd-libs systemd-devel libxkbcommon libxkbcommon-devel libcap libcap-devel pkgconf-pkg-config
 
-To compile `kloak`, simply run:
+To compile and install `kloak`, simply run:
 
-    $ make all
+    $ make
+    $ sudo make install
+    $ sudo systemd-sysusers
 
-### As a service
+Note that `kloak` will not run properly until installed.
+
+### From the Whonix repos
 
 How to install `kloak` using apt-get
 
@@ -91,9 +95,9 @@ See the [Whonix package build documentation](https://www.whonix.org/wiki/Dev/Bui
 
 ## Usage
 
-Once `kloak` is compiled and installed, start it as root. This typically must run as root because `kloak` grabs exclusive access to input device files:
+Once `kloak` is compiled and installed, start it as root. This must run as root because `kloak` grabs exclusive access to input device files. `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` must be passed through in the environment for `kloak` to find the Wayland compositor:
 
-    $ sudo ./kloak
+    $ sudo XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY}" /usr/bin/kloak
 
 Then attempt to move the mouse. A red `+` sign should move around on the display. This is `kloak`'s mouse cursor. If you see this, `kloak` is running properly.
 
@@ -101,7 +105,7 @@ You can use the keyboard the same way you usually would. Keystrokes will not app
 
 The mouse can also be used the same as usual. When you move the mouse, only `kloak`'s mouse cursor will initially move; the operating system's cursor will "chase" it by jumping to `kloak`'s cursor's position at semi-random times. `kloak` will properly record where click events occur so that even if you click a location before the operating system's mouse cursor reaches that location, the click will register in the intended location.
 
-If `kloak` is installed as a service, you should see the red `+` mouse cursor upon startup. All input events will be anonymized automatically.
+If `kloak` is installed as a service, you should see the red `+` mouse cursor upon startup. All input events will be anonymized automatically. If you need to restart `kloak` (for instance to regain control of input devices after switching to a TTY), press Right Shift + Escape to force `kloak` to terminate. It will automatically restart some time after a Wayland compositor takes control of the display.
 
 ## Whonix contact and support
 
@@ -179,6 +183,6 @@ kloak grabs the input device and sends delayed input events to the Wayland compo
 `kloak` does not protect against all forms of keystroke biometrics that can be used for identification. Specifically,
 
 * If the delay is too small, it is not effective. Adjust the delay to as high a value that's comfortable.
-* Repeated key presses are not obfuscated. If your system is set to repeat held-down keys at a unique rate, this could leak your identity. (TODO: Is this still the case, or are held-down keys obfuscated now?)
+* Repeated key presses are not obfuscated. If your system is set to repeat held-down keys at a unique rate, this could leak your identity.
 * Writing style is still apparent, in which [stylometry techniques could be used to determine authorship](https://vmonaco.com/papers/An%20investigation%20of%20keystroke%20and%20stylometry%20traits%20for%20authenticating%20online%20test%20takers.pdf).
 * Higher-level cognitive behavior, such as editing and application usage, are still apparent. These lower-frequency actions are less understood at this point, but could potentially be used to reveal identity.

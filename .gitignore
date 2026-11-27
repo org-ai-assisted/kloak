@@ -1,4 +1,7 @@
 /kloak
+/kloakwl
+/src/kloak.c
+/src/kloak.h
 /out/
 eventcap
 cmake-build-debug/

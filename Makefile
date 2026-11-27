@@ -20,7 +20,7 @@ TARGETARCH=$(shell $(CC) -dumpmachine)
 CC_VERSION=$(shell $(CC) --version)
 
 # https://www.kicksecure.com/wiki/Dev/compiler_hardening
-WARN_CFLAGS := -Wall -Wextra -Wformat -Wformat=2 -Wconversion \
+WARN_CFLAGS := -Werror -Wall -Wextra -Wformat -Wformat=2 -Wconversion \
 	-Wimplicit-fallthrough -Werror=format-security -Werror=implicit \
 	-Werror=int-conversion -Werror=incompatible-pointer-types \
 	-Wformat-overflow -Wformat-signedness -Wformat-truncation \
@@ -78,12 +78,17 @@ ifeq (, $(shell which $(PKG_CONFIG)))
 $(error pkg-config not installed!)
 endif
 
-all : kloak
+all : kloak kloakwl
 
-kloak : src/kloak.c src/kloak.h src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-layer-shell.h src/wlr-virtual-pointer.c src/wlr-virtual-pointer.h src/virtual-keyboard.c src/virtual-keyboard.h
+kloakwl : src/kloakwl.c src/kloakwl.h src/kloak-shared.h src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-layer-shell.h src/wlr-virtual-pointer.c src/wlr-virtual-pointer.h src/virtual-keyboard.c src/virtual-keyboard.h
 	## Comment out the below line and uncomment the line after it to do a test build with -fanalyzer
-	$(CC) -g src/kloak.c src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c -o kloak -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) $(CFLAGS) $(LDFLAGS)
-	#$(CC) -g src/kloak.c src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c -o kloak -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -fanalyzer
+	$(CC) -g src/kloakwl.c src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c -o kloakwl -lm -lrt -lcap $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) $(CFLAGS) $(LDFLAGS)
+	#$(CC) -g src/kloakwl.c src/xdg-shell-protocol.c src/xdg-output-protocol.c src/wlr-layer-shell.c src/wlr-virtual-pointer.c src/virtual-keyboard.c -o kloakwl -lm -lrt -lcap $(shell $(PKG_CONFIG) --cflags --libs wayland-client) $(shell $(PKG_CONFIG) --cflags --libs xkbcommon) -fanalyzer
+
+kloak : src/kloak.c src/kloak.h src/kloak-shared.h
+	## Comment out the below line and uncomment the line after it to do a test build with -fanalyzer
+	$(CC) -g src/kloak.c -o kloak -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) $(CFLAGS) $(LDFLAGS)
+	#$(CC) -g src/kloak.c -o kloak -lm -lrt $(shell $(PKG_CONFIG) --cflags --libs libinput) $(shell $(PKG_CONFIG) --cflags --libs libevdev) -fanalyzer
 
 src/xdg-shell-protocol.h : protocol/xdg-shell.xml
 	wayland-scanner client-header < protocol/xdg-shell.xml > src/xdg-shell-protocol.h
@@ -115,6 +120,12 @@ src/virtual-keyboard.h : protocol/virtual-keyboard-unstable-v1.xml
 src/virtual-keyboard.c : protocol/virtual-keyboard-unstable-v1.xml
 	wayland-scanner private-code < protocol/virtual-keyboard-unstable-v1.xml > src/virtual-keyboard.c
 
+src/kloak.h : src/kloak.h.in
+	scripts/src-transform src/kloak.h.in $(bindir)
+
+src/kloak.c : src/kloak.c.in
+	scripts/src-transform src/kloak.c.in
+
 MANPAGES := auto-generated-man-pages/kloak.8
 
 man : $(MANPAGES)
@@ -123,11 +134,13 @@ auto-generated-man-pages/% : man/%.ronn
 	ronn --manual="kloak Manual" --organization="kloak" <$< >$@
 
 clean :
-	rm -f kloak
-	rm -f src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.h src/wlr-layer-shell.c src/wlr-virtual-pointer.h src/wlr-virtual-pointer.c src/virtual-keyboard.h src/virtual-keyboard.c
+	rm -f kloak kloakwl
+	rm -f src/xdg-shell-protocol.h src/xdg-shell-protocol.c src/xdg-output-protocol.h src/xdg-output-protocol.c src/wlr-layer-shell.h src/wlr-layer-shell.c src/wlr-virtual-pointer.h src/wlr-virtual-pointer.c src/virtual-keyboard.h src/virtual-keyboard.c src/kloak.h src/kloak.c
 
-install : all etc/apparmor.d/usr.bin.kloak $(MANPAGES)
+install : all etc/apparmor.d/usr.bin.kloak etc/apparmor.d/usr.bin.kloakwl $(MANPAGES)
 	$(INSTALL) -d -m 755 $(addprefix $(DESTDIR), $(bindir) $(mandir)/man8 $(apparmor_dir))
 	$(INSTALL) -m 755 kloak $(DESTDIR)$(bindir)
+	$(INSTALL) -m 755 kloakwl $(DESTDIR)$(bindir)
 	$(INSTALL) -m 644 $(MANPAGES) $(DESTDIR)$(mandir)/man8
 	$(INSTALL) -m 644 etc/apparmor.d/usr.bin.kloak $(DESTDIR)$(apparmor_dir)
+	$(INSTALL) -m 644 etc/apparmor.d/usr.bin.kloakwl $(DESTDIR)$(apparmor_dir)
