@@ -49,7 +49,9 @@ Guidelines learned from upstream review of security hardening patches
 ### Array Bounds
 
 - Always assert both lower AND upper bounds before indexing into fixed-size
-  arrays (e.g. `assert(idx >= 0 && idx < MAX_SCREEN_COUNT)`).
+  arrays (e.g. `assert(idx >= 0 && idx < MAX_SCREEN_COUNT)`), unless
+  surrounding logic is reasonably simple and already ensures an out of bounds
+  index cannot be accessed.
 
 ### inotify-Specific
 
