@@ -902,7 +902,7 @@ static void layer_surface_configure(__attribute__((unused)) void *data,
       }
     }
   }
-  assert(layer != NULL);
+  assert(i < MAX_SCREEN_COUNT && layer != NULL);
 
   /*
    * Use the pending output geometry here, as it likely contains an up-to-date
