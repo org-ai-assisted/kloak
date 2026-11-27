@@ -2091,7 +2091,7 @@ static void applayer_config_init(void) {
   enum ptc_packet_type msg_type = 0;
   void *msg_obj = NULL;
   struct pollfd wait_pollfd = {
-    .fd = recv_read_fd,
+    .fd = -1,
     .events = POLLIN,
     .revents = 0
   };
@@ -2100,6 +2100,15 @@ static void applayer_config_init(void) {
   init_msg_ring();
   send_write_fd = 1; /* stdout */
   recv_read_fd = 0; /* stdin */
+  /*
+   * Capture the config fd AFTER setting recv_read_fd: it defaults to -1
+   * (kloak-shared.h) and applayer_config_init runs first in main(), so a
+   * declaration-time .fd = recv_read_fd would poll fd -1 -- an ignored
+   * descriptor that never reports POLLHUP. A parent that dies before sending
+   * config would then hang the child in poll() forever while it holds caps,
+   * instead of exiting on hangup.
+   */
+  wait_pollfd.fd = recv_read_fd;
 
   while (true) {
     if (max_delay_received && cursor_color_received) {
